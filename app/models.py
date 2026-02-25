@@ -1,0 +1,147 @@
+from typing import Optional
+import datetime
+import uuid
+
+from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, String, UniqueConstraint, Uuid, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Owners(Base):
+    __tablename__ = 'owners'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='owners_pkey'),
+        UniqueConstraint('user', name='owners_user_key')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    user: Mapped[str] = mapped_column(String, nullable=False)
+    password: Mapped[str] = mapped_column(String, nullable=False)
+    company_name: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+
+    chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='owners')
+
+
+class Chargers(Base):
+    __tablename__ = 'chargers'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_owner'], ['owners.id'], ondelete='SET NULL', onupdate='CASCADE', name='fk_owner'),
+        PrimaryKeyConstraint('id', name='chargers_pkey')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    latitude: Mapped[float] = mapped_column(Double(53), nullable=False)
+    longitude: Mapped[float] = mapped_column(Double(53), nullable=False)
+    nominal_power: Mapped[float] = mapped_column(Double(53), nullable=False)
+    plugs: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    id_owner: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+
+    owners: Mapped[Optional['Owners']] = relationship('Owners', back_populates='chargers')
+    charging_sessions: Mapped[list['ChargingSessions']] = relationship('ChargingSessions', back_populates='chargers')
+    ev_duration_cdf: Mapped[list['EvDurationCdf']] = relationship('EvDurationCdf', back_populates='chargers')
+    ev_forecast_stats: Mapped[list['EvForecastStats']] = relationship('EvForecastStats', back_populates='chargers')
+
+
+class ChargingSessions(Base):
+    __tablename__ = 'charging_sessions'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_charger'], ['chargers.id'], ondelete='SET NULL', onupdate='CASCADE', name='fk_charger'),
+        PrimaryKeyConstraint('id', name='charging_sessions_pkey')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    start_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    energy_delivered_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    forecasted_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    forecasted_energy_kwh_std: Mapped[float] = mapped_column(Double(53), nullable=False)
+    forecasted_duration_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
+    forecasted_duration_hours_std: Mapped[float] = mapped_column(Double(53), nullable=False)
+    controlled_charging_points: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('1'))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    end_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime)
+    end_charging_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime)
+    duration: Mapped[Optional[float]] = mapped_column(Double(53))
+
+    chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='charging_sessions')
+    actions: Mapped[list['Actions']] = relationship('Actions', back_populates='charging_sessions')
+
+
+class EvDurationCdf(Base):
+    __tablename__ = 'ev_duration_cdf'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_charger'], ['chargers.id'], ondelete='SET NULL', onupdate='CASCADE', name='ev_duration_cdf_id_charger_fkey'),
+        PrimaryKeyConstraint('id', name='ev_duration_cdf_pkey1')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    horizon_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
+    probability: Mapped[float] = mapped_column(Double(53), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+
+    chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='ev_duration_cdf')
+
+
+class EvForecastStats(Base):
+    __tablename__ = 'ev_forecast_stats'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_charger'], ['chargers.id'], ondelete='SET NULL', onupdate='CASCADE', name='ev_forecast_stats_id_charger_fkey'),
+        PrimaryKeyConstraint('id', name='ev_forecast_stats_pkey1')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    mean_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    std_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    mean_duration_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
+    std_duration_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+
+    chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='ev_forecast_stats')
+
+
+class Actions(Base):
+    __tablename__ = 'actions'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_cs'], ['charging_sessions.id'], ondelete='SET NULL', onupdate='CASCADE', name='actions_id_cs_fkey'),
+        PrimaryKeyConstraint('id', name='actions_pkey')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    current_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    current_power_kw: Mapped[float] = mapped_column(Double(53), nullable=False)
+    energy_delivered_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    is_fully_charged: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    probability_disconnection: Mapped[float] = mapped_column(Double(53), nullable=False)
+    cumulative_duration_probability: Mapped[float] = mapped_column(Double(53), nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    id_cs: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+
+    charging_sessions: Mapped[Optional['ChargingSessions']] = relationship('ChargingSessions', back_populates='actions')
+    grid_load_forecasted: Mapped[list['GridLoadForecasted']] = relationship('GridLoadForecasted', back_populates='actions')
+
+
+class GridLoadForecasted(Base):
+    __tablename__ = 'grid_load_forecasted'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_action'], ['actions.id'], ondelete='SET NULL', onupdate='CASCADE', name='grid_load_forecasted_id_action_fkey'),
+        PrimaryKeyConstraint('id', name='grid_load_forecasted_pkey')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    value: Mapped[float] = mapped_column(Double(53), nullable=False)
+    id_action: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+
+    actions: Mapped[Optional['Actions']] = relationship('Actions', back_populates='grid_load_forecasted')

@@ -3,8 +3,9 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
-from app.models.db.ev_forecast_stats import EVForecastStatsDB
+from app.models import EvForecastStats
 from app.services.common.constants import GENERIC_CHARGER_ID
+
 
 def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float, float, float]:
     """
@@ -14,26 +15,36 @@ def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float
     - std_energy_kwh
     - forecasted_duration_hours
     - std_duration_hours
+
+    Uses the latest stored EvForecastStats row (by updated_at) for the given charger/hour.
+    Falls back to GENERIC_CHARGER_ID if charger-specific stats are not present.
     """
 
     connection_hour = int(start_time.hour)
     db: Session = SessionLocal()
 
     try:
-        # Try charger-specific forecast
+        # Try latest charger-specific forecast (order by updated_at desc)
         stat = (
-            db.query(EVForecastStatsDB)
+            db.query(EvForecastStats)
             .filter(
-                EVForecastStatsDB.charger_id == charger_id,
-                EVForecastStatsDB.hour == connection_hour
+                EvForecastStats.id_charger == charger_id,
+                EvForecastStats.hour == connection_hour,
             )
+            .order_by(EvForecastStats.updated_at.desc())
             .first()
         )
 
+        # Fallback to generic
         if stat is None:
             stat = (
-                db.query(EVForecastStatsDB).filter(EVForecastStatsDB.charger_id == GENERIC_CHARGER_ID,
-                                                   EVForecastStatsDB.hour == connection_hour).first()
+                db.query(EvForecastStats)
+                .filter(
+                    EvForecastStats.id_charger == GENERIC_CHARGER_ID,
+                    EvForecastStats.hour == connection_hour,
+                )
+                .order_by(EvForecastStats.updated_at.desc())
+                .first()
             )
 
         if stat is None:

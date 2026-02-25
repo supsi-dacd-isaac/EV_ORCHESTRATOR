@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.db.session import SessionLocal
-from app.models.db.charging_session import ChargingSessionDB
+from app.models import ChargingSessions
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -11,12 +11,12 @@ def get_all_sessions():
     """
     db = SessionLocal()
     try:
-        sessions = db.query(ChargingSessionDB).all()
+        sessions = db.query(ChargingSessions).all()
 
         return [
             {
                 "id": s.id,
-                "charger_id": s.charger_id,
+                "charger_id": s.id_charger,
                 "start_time": s.start_time,
                 "end_time": s.end_time,
                 "energy_delivered_kwh": s.energy_delivered_kwh,
@@ -36,8 +36,8 @@ def get_charger_sessions(charger_id: str):
     db = SessionLocal()
     try:
         sessions = (
-            db.query(ChargingSessionDB)
-            .filter(ChargingSessionDB.charger_id == charger_id)
+            db.query(ChargingSessions)
+            .filter(ChargingSessions.id_charger == charger_id)
             .all()
         )
 

@@ -1,7 +1,9 @@
 from datetime import datetime
+import uuid
 from app.db.session import SessionLocal
-from app.models.db.ev_forecast_stats import EVForecastStatsDB
+from app.models import EvForecastStats
 from app.db.ev_forecast_defaults import DEFAULT_EV_FORECAST
+
 
 def init_ev_forecast(charger_id: str):
     """
@@ -10,8 +12,9 @@ def init_ev_forecast(charger_id: str):
     db = SessionLocal()
     try:
         for hour, (mean_energy, std_energy, mean_duration, std_duration, sample_count) in DEFAULT_EV_FORECAST.items():
-            stat = EVForecastStatsDB(
-                charger_id=charger_id,
+            stat = EvForecastStats(
+                id=uuid.uuid4(),
+                id_charger=charger_id,
                 hour=hour,
                 mean_energy_kwh=mean_energy,
                 std_energy_kwh=std_energy,

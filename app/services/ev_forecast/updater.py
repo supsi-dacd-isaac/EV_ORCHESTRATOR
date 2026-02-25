@@ -3,11 +3,13 @@ from math import sqrt
 from sqlalchemy.orm import Session
 from sqlalchemy import extract
 import numpy as np
+from uuid import uuid4
 
-from app.models.db.ev_forecast_stats import EVForecastStatsDB
+from app.models import EvForecastStats
 from app.services.common.db_utils import get_db_session, completed_sessions_count
 from app.services.common.constants import GENERIC_CHARGER_ID, MIN_SESSIONS_FOR_CHARGER_SPECIFIC
-from app.models.db.charging_session import ChargingSessionDB
+from app.models import ChargingSessions
+
 
 def _update_online_stats(mean: float, var: float, n: int, x: float):
     n_new = n + 1
@@ -19,6 +21,7 @@ def _update_online_stats(mean: float, var: float, n: int, x: float):
 
 
 def update_ev_forecast(
+    db: Session,
     charger_id: str,
     start_time: datetime,
     energy_kwh: float,
@@ -30,57 +33,73 @@ def update_ev_forecast(
 
     hour = start_time.hour
 
-    with get_db_session() as db:
+    # -----------------------------------
+    # Always update GENERIC forecast (append new row)
+    # -----------------------------------
+    _update_or_initialize_stat(
+        db,
+        charger_id=GENERIC_CHARGER_ID,
+        hour=hour,
+        energy_kwh=energy_kwh,
+        duration_hours=duration_hours,
+    )
 
-        # -----------------------------------
-        # Always update GENERIC forecast
-        # -----------------------------------
-        _update_or_initialize_stat(
-            db,
-            charger_id=GENERIC_CHARGER_ID,
+    # -----------------------------------
+    # Charger-specific logic
+    # -----------------------------------
+    charger_stat = (
+        db.query(EvForecastStats).filter(
+            EvForecastStats.id_charger == charger_id,
+            EvForecastStats.hour == hour,
+        )
+        .order_by(EvForecastStats.updated_at.desc())
+        .first()
+    )
+
+    if charger_stat:
+        # derive new aggregated stats from latest
+        energy_var = (charger_stat.std_energy_kwh ** 2) * charger_stat.sample_count
+        duration_var = (charger_stat.std_duration_hours ** 2) * charger_stat.sample_count
+
+        mean_energy, energy_var, n = _update_online_stats(
+            charger_stat.mean_energy_kwh, energy_var, charger_stat.sample_count, energy_kwh
+        )
+        mean_duration, duration_var, _ = _update_online_stats(
+            charger_stat.mean_duration_hours, duration_var, charger_stat.sample_count, duration_hours
+        )
+
+        new_stat = EvForecastStats(
+            id=uuid4(),
             hour=hour,
-            energy_kwh=energy_kwh,
-            duration_hours=duration_hours,
+            mean_energy_kwh=mean_energy,
+            std_energy_kwh=sqrt(energy_var / n),
+            mean_duration_hours=mean_duration,
+            std_duration_hours=sqrt(duration_var / n),
+            sample_count=n,
+            updated_at=datetime.utcnow(),
+            id_charger=charger_id,
         )
+        db.add(new_stat)
 
-        # -----------------------------------
-        # Charger-specific logic
-        # -----------------------------------
-        charger_stat = (
-            db.query(EVForecastStatsDB)
-            .filter(
-                EVForecastStatsDB.charger_id == charger_id,
-                EVForecastStatsDB.hour == hour,
-            )
-            .first()
-        )
-
-        if charger_stat:
-            _update_existing_stat(
-                charger_stat,
-                energy_kwh,
-                duration_hours,
-            )
-
-        else:
-            sessions = (
-                db.query(ChargingSessionDB)
+    else:
+        # check sessions to decide whether to initialize a new charger-specific stat
+        sessions = (
+                db.query(ChargingSessions)
                 .filter(
-                    ChargingSessionDB.charger_id == charger_id,
-                    extract("hour", ChargingSessionDB.start_time) == hour,
+                    ChargingSessions.id_charger == charger_id,
+                    extract("hour", ChargingSessions.start_time) == hour,
                 )
                 .all()
             )
 
-            count = len(sessions)
-            if count >= MIN_SESSIONS_FOR_CHARGER_SPECIFIC:
-                _initialize_new_stat(
-                    db,
-                    charger_id,
-                    hour,
-                    sessions
-                )
-
+        count = len(sessions)
+        if count >= MIN_SESSIONS_FOR_CHARGER_SPECIFIC:
+            _initialize_new_stat(
+                db,
+                charger_id,
+                hour,
+                sessions
+            )
 
 
 def _update_or_initialize_stat(
@@ -90,18 +109,24 @@ def _update_or_initialize_stat(
     energy_kwh: float,
     duration_hours: float,
 ):
-    stat = (
-        db.query(EVForecastStatsDB)
+    """
+    ONLY TO USE WITH GENERIC CHARGER ID
+    """
+
+    latest = (
+        db.query(EvForecastStats)
         .filter(
-            EVForecastStatsDB.charger_id == charger_id,
-            EVForecastStatsDB.hour == hour,
+            EvForecastStats.id_charger == charger_id,
+            EvForecastStats.hour == hour,
         )
+        .order_by(EvForecastStats.updated_at.desc())
         .first()
     )
 
-    if stat is None:
-        stat = EVForecastStatsDB(
-            charger_id=charger_id,
+    if latest is None:
+        # Create initial stat row
+        stat = EvForecastStats(
+            id=uuid4(),
             hour=hour,
             mean_energy_kwh=energy_kwh,
             std_energy_kwh=0.0,
@@ -109,41 +134,41 @@ def _update_or_initialize_stat(
             std_duration_hours=0.0,
             sample_count=1,
             updated_at=datetime.utcnow(),
+            id_charger=charger_id,
         )
         db.add(stat)
         return
 
-    _update_existing_stat(stat, energy_kwh, duration_hours)
-
-
-def _update_existing_stat(
-    stat: EVForecastStatsDB,
-    energy_kwh: float,
-    duration_hours: float,
-):
-    energy_var = (stat.std_energy_kwh ** 2) * stat.sample_count
-    duration_var = (stat.std_duration_hours ** 2) * stat.sample_count
+    # Otherwise derive a new aggregated stat and append it
+    energy_var = (latest.std_energy_kwh ** 2) * latest.sample_count
+    duration_var = (latest.std_duration_hours ** 2) * latest.sample_count
 
     mean_energy, energy_var, n = _update_online_stats(
-        stat.mean_energy_kwh, energy_var, stat.sample_count, energy_kwh
+        latest.mean_energy_kwh, energy_var, latest.sample_count, energy_kwh
     )
     mean_duration, duration_var, _ = _update_online_stats(
-        stat.mean_duration_hours, duration_var, stat.sample_count, duration_hours
+        latest.mean_duration_hours, duration_var, latest.sample_count, duration_hours
     )
 
-    stat.mean_energy_kwh = mean_energy
-    stat.std_energy_kwh = sqrt(energy_var / n)
-    stat.mean_duration_hours = mean_duration
-    stat.std_duration_hours = sqrt(duration_var / n)
-    stat.sample_count = n
-    stat.updated_at = datetime.utcnow()
+    stat = EvForecastStats(
+        id=uuid4(),
+        hour=hour,
+        mean_energy_kwh=mean_energy,
+        std_energy_kwh=sqrt(energy_var / n),
+        mean_duration_hours=mean_duration,
+        std_duration_hours=sqrt(duration_var / n),
+        sample_count=n,
+        updated_at=datetime.utcnow(),
+        id_charger=charger_id,
+    )
+    db.add(stat)
 
 
 def _initialize_new_stat(
     db: Session,
     charger_id: str,
     hour: int,
-    sessions: list[ChargingSessionDB],
+    sessions: list[ChargingSessions],
 ):
     energy_values = [s.energy_delivered_kwh for s in sessions]
     duration_values = [(s.end_charging_time - s.start_time).total_seconds() / 3600 for s in sessions]
@@ -154,8 +179,8 @@ def _initialize_new_stat(
     std_duration = float(np.std(duration_values, ddof=0))
     sample_count = len(sessions)
 
-    stat = EVForecastStatsDB(
-        charger_id=charger_id,
+    stat = EvForecastStats(
+        id=uuid4(),
         hour=hour,
         mean_energy_kwh=mean_energy,
         std_energy_kwh=std_energy,
@@ -163,5 +188,6 @@ def _initialize_new_stat(
         std_duration_hours=std_duration,
         sample_count= sample_count,
         updated_at=datetime.utcnow(),
+        id_charger=charger_id,
     )
     db.add(stat)

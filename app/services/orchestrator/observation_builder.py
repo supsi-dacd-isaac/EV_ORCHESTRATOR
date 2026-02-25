@@ -2,8 +2,6 @@ from datetime import datetime
 import numpy as np
 
 from app.services.orchestrator.constants import ENERGY_NEED_95Q, DURATION_95Q, CHARGING_RATE_CONSTANT, NUMBER_CHARGING_POINTS_CONSTANT
-from app.services.orchestrator.duration_cdf.query import get_cumulative_duration_probability
-from app.services.orchestrator.disconnection_probability import get_disconnection_prob
 
 def prepare_observation(
     charger_id: str,
@@ -17,8 +15,9 @@ def prepare_observation(
     forecasted_duration_hours_std:float,
     energy_delivered_kwh: float,
     community_load_kw,
-    controlled_charging_points: int
-
+    controlled_charging_points: int,
+    probability_disconnection: float,
+    cumulative_duration_probability: float,
 ):
     time_connection_hour = time_connection.hour
     time_current_hour = time_current.hour
@@ -43,11 +42,8 @@ def prepare_observation(
     duration_forecasted_log = _f(np.log1p(forecasted_duration_hours) / np.log1p(DURATION_95Q))
     duration_forecasted_std_norm = _f(forecasted_duration_hours_std / (forecasted_duration_hours + 1e-12))
 
-    probability_disconnection = _f(get_disconnection_prob(station_id=charger_id,connected_duration=connected_time_hours))
-    cumulative_duration_probability = _f(get_cumulative_duration_probability(
-                                                                charger_id=charger_id,
-                                                                connected_time_hours=connected_time_hours,
-                                                                        ))
+    probability_disconnection = _f(probability_disconnection)
+    cumulative_duration_probability = _f(cumulative_duration_probability)
 
     energy_charged_rel_needed = _f(energy_delivered_kwh / forecasted_energy_kwh)
     charging_rate_norm = _f(current_power_kw / CHARGING_RATE_CONSTANT)

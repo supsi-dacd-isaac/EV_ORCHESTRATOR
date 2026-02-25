@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract
 
 from app.db.session import SessionLocal
-from app.models.db.charging_session import ChargingSessionDB
+from app.models import ChargingSessions
 
 
 @contextmanager
@@ -39,13 +39,13 @@ def completed_sessions_count(
     If hour == -1, count sessions across all hours.
     """
 
-    query = db.query(ChargingSessionDB).filter(
-        ChargingSessionDB.charger_id == charger_id
+    query = db.query(ChargingSessions).filter(
+        ChargingSessions.id_charger == charger_id
     )
 
     if hour != -1:
         query = query.filter(
-            extract("hour", ChargingSessionDB.start_time) == hour
+            extract("hour", ChargingSessions.start_time) == hour
         )
 
     return query.count()
