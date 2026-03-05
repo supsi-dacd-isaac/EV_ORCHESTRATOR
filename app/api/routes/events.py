@@ -19,7 +19,6 @@ router = APIRouter(prefix="/events", tags=["events"])
 class VehicleConnectedEvent(BaseModel):
     charger_id: str
     timestamp: datetime
-    charger_type: str
     measured_power_kw: float
     charger_nom_power_kw: float
     is_fully_charged: bool
@@ -65,7 +64,7 @@ def vehicle_connected(event: VehicleConnectedEvent):
         if existing_session:
             # Active session found: compute action based on existing session and send warning
 
-            current_power_kw = event.current_power_kw
+            current_power_kw = event.measured_power_kw
             energy_delivered_kwh = existing_session.energy_delivered_kwh
             is_fully_charged = event.is_fully_charged
 
