@@ -11,7 +11,7 @@ def get_cumulative_duration_probability(
     connected_time_hours: float,
 ) -> float:
     """
-    Returns P(duration <= connected_time_hours) --> which could be interpreted as a cumulative probability of disconnection
+    Returns P(duration <= connected_time_hours) --> which could be interpreted as a cumulative probability of disconnection - not exactly the same because it should be conditional
     using linear interpolation over stored CDF horizons.
 
     Uses the latest stored EvDurationCdf rows (by updated_at) for the given charger/hour=-1.

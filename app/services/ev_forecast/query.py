@@ -24,7 +24,7 @@ def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float
     db: Session = SessionLocal()
 
     try:
-        # Try latest charger-specific forecast (order by updated_at desc)
+        # Try charger-specific forecast
         stat = (
             db.query(EvForecastStats)
             .filter(

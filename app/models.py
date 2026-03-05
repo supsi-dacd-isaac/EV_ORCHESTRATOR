@@ -20,15 +20,35 @@ class Owners(Base):
     user: Mapped[str] = mapped_column(String, nullable=False)
     password: Mapped[str] = mapped_column(String, nullable=False)
     company_name: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    type: Mapped[Optional[str]] = mapped_column(String)
+    role: Mapped[Optional[str]] = mapped_column(String)
 
+    pilot: Mapped[list['Pilot']] = relationship('Pilot', back_populates='owners')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='owners')
+
+
+class Pilot(Base):
+    __tablename__ = 'pilot'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_owner'], ['owners.id'], ondelete='SET NULL', onupdate='CASCADE', name='id_owner'),
+        PrimaryKeyConstraint('id', name='pilot_pk'),
+        UniqueConstraint('name', name='pilot_unique')
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    id_owner: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
+    chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
 
 
 class Chargers(Base):
     __tablename__ = 'chargers'
     __table_args__ = (
         ForeignKeyConstraint(['id_owner'], ['owners.id'], ondelete='SET NULL', onupdate='CASCADE', name='fk_owner'),
+        ForeignKeyConstraint(['id_pilot'], ['pilot.id'], ondelete='SET NULL', onupdate='CASCADE', name='fk_pilot'),
         PrimaryKeyConstraint('id', name='chargers_pkey')
     )
 
@@ -39,10 +59,12 @@ class Chargers(Base):
     longitude: Mapped[float] = mapped_column(Double(53), nullable=False)
     nominal_power: Mapped[float] = mapped_column(Double(53), nullable=False)
     plugs: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
     id_owner: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    id_pilot: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
     owners: Mapped[Optional['Owners']] = relationship('Owners', back_populates='chargers')
+    pilot: Mapped[Optional['Pilot']] = relationship('Pilot', back_populates='chargers')
     charging_sessions: Mapped[list['ChargingSessions']] = relationship('ChargingSessions', back_populates='chargers')
     ev_duration_cdf: Mapped[list['EvDurationCdf']] = relationship('EvDurationCdf', back_populates='chargers')
     ev_forecast_stats: Mapped[list['EvForecastStats']] = relationship('EvForecastStats', back_populates='chargers')
@@ -128,6 +150,7 @@ class Actions(Base):
     cumulative_duration_probability: Mapped[float] = mapped_column(Double(53), nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
     id_cs: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    policy: Mapped[Optional[str]] = mapped_column(String)
 
     charging_sessions: Mapped[Optional['ChargingSessions']] = relationship('ChargingSessions', back_populates='actions')
     grid_load_forecasted: Mapped[list['GridLoadForecasted']] = relationship('GridLoadForecasted', back_populates='actions')

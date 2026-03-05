@@ -6,39 +6,6 @@ from decimal import Decimal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
-class EvForecastStatsCreate(BaseModel):
-    hour: int
-    mean_energy_kwh: float
-    std_energy_kwh: float
-    mean_duration_hours: float
-    std_duration_hours: float
-    sample_count: int
-    updated_at: datetime
-    id_charger: Optional[UUID] = None
-
-class EvForecastStatsUpdate(BaseModel):
-    id: Optional[UUID] = None
-    hour: Optional[int] = None
-    mean_energy_kwh: Optional[float] = None
-    std_energy_kwh: Optional[float] = None
-    mean_duration_hours: Optional[float] = None
-    std_duration_hours: Optional[float] = None
-    sample_count: Optional[int] = None
-    updated_at: Optional[datetime] = None
-    id_charger: Optional[UUID] = None
-
-class EvForecastStatsRead(BaseModel):
-    id: UUID
-    hour: int
-    mean_energy_kwh: float
-    std_energy_kwh: float
-    mean_duration_hours: float
-    std_duration_hours: float
-    sample_count: int
-    updated_at: datetime
-    id_charger: Optional[UUID]
-    model_config = ConfigDict(from_attributes=True)
-
 class ChargersCreate(BaseModel):
     name: str
     type: str
@@ -48,6 +15,7 @@ class ChargersCreate(BaseModel):
     plugs: str
     updated_at: datetime
     id_owner: Optional[UUID] = None
+    id_pilot: Optional[UUID] = None
 
 class ChargersUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -59,6 +27,7 @@ class ChargersUpdate(BaseModel):
     plugs: Optional[str] = None
     updated_at: Optional[datetime] = None
     id_owner: Optional[UUID] = None
+    id_pilot: Optional[UUID] = None
 
 class ChargersRead(BaseModel):
     id: UUID
@@ -70,21 +39,7 @@ class ChargersRead(BaseModel):
     plugs: str
     updated_at: datetime
     id_owner: Optional[UUID]
-    model_config = ConfigDict(from_attributes=True)
-
-class GridLoadForecastedCreate(BaseModel):
-    value: float
-    id_action: Optional[UUID] = None
-
-class GridLoadForecastedUpdate(BaseModel):
-    id: Optional[UUID] = None
-    value: Optional[float] = None
-    id_action: Optional[UUID] = None
-
-class GridLoadForecastedRead(BaseModel):
-    id: UUID
-    value: float
-    id_action: Optional[UUID]
+    id_pilot: Optional[UUID]
     model_config = ConfigDict(from_attributes=True)
 
 class ChargingSessionsCreate(BaseModel):
@@ -135,6 +90,48 @@ class ChargingSessionsRead(BaseModel):
     duration: Optional[float]
     model_config = ConfigDict(from_attributes=True)
 
+class GridLoadForecastedCreate(BaseModel):
+    value: float
+    id_action: Optional[UUID] = None
+
+class GridLoadForecastedUpdate(BaseModel):
+    id: Optional[UUID] = None
+    value: Optional[float] = None
+    id_action: Optional[UUID] = None
+
+class GridLoadForecastedRead(BaseModel):
+    id: UUID
+    value: float
+    id_action: Optional[UUID]
+    model_config = ConfigDict(from_attributes=True)
+
+class OwnersCreate(BaseModel):
+    user: str
+    password: str
+    company_name: str
+    updated_at: datetime
+    type: Optional[str] = None
+    role: Optional[str] = None
+
+class OwnersUpdate(BaseModel):
+    id: Optional[UUID] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+    company_name: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    type: Optional[str] = None
+    role: Optional[str] = None
+
+class OwnersRead(BaseModel):
+    id: UUID
+    user: str
+    password: str
+    company_name: str
+    updated_at: datetime
+    type: Optional[str]
+    role: Optional[str]
+    model_config = ConfigDict(from_attributes=True)
+
 class EvDurationCdfCreate(BaseModel):
     hour: int
     horizon_hours: float
@@ -162,25 +159,52 @@ class EvDurationCdfRead(BaseModel):
     id_charger: Optional[UUID]
     model_config = ConfigDict(from_attributes=True)
 
-class OwnersCreate(BaseModel):
-    user: str
-    password: str
-    company_name: str
-    updated_at: datetime
+class PilotCreate(BaseModel):
+    name: str
+    id_owner: UUID
 
-class OwnersUpdate(BaseModel):
+class PilotUpdate(BaseModel):
     id: Optional[UUID] = None
-    user: Optional[str] = None
-    password: Optional[str] = None
-    company_name: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    name: Optional[str] = None
+    id_owner: Optional[UUID] = None
 
-class OwnersRead(BaseModel):
+class PilotRead(BaseModel):
     id: UUID
-    user: str
-    password: str
-    company_name: str
+    name: str
+    id_owner: UUID
+    model_config = ConfigDict(from_attributes=True)
+
+class EvForecastStatsCreate(BaseModel):
+    hour: int
+    mean_energy_kwh: float
+    std_energy_kwh: float
+    mean_duration_hours: float
+    std_duration_hours: float
+    sample_count: int
     updated_at: datetime
+    id_charger: Optional[UUID] = None
+
+class EvForecastStatsUpdate(BaseModel):
+    id: Optional[UUID] = None
+    hour: Optional[int] = None
+    mean_energy_kwh: Optional[float] = None
+    std_energy_kwh: Optional[float] = None
+    mean_duration_hours: Optional[float] = None
+    std_duration_hours: Optional[float] = None
+    sample_count: Optional[int] = None
+    updated_at: Optional[datetime] = None
+    id_charger: Optional[UUID] = None
+
+class EvForecastStatsRead(BaseModel):
+    id: UUID
+    hour: int
+    mean_energy_kwh: float
+    std_energy_kwh: float
+    mean_duration_hours: float
+    std_duration_hours: float
+    sample_count: int
+    updated_at: datetime
+    id_charger: Optional[UUID]
     model_config = ConfigDict(from_attributes=True)
 
 class ActionsCreate(BaseModel):
@@ -192,6 +216,7 @@ class ActionsCreate(BaseModel):
     cumulative_duration_probability: float
     action: str
     id_cs: Optional[UUID] = None
+    policy: Optional[str] = None
 
 class ActionsUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -203,6 +228,7 @@ class ActionsUpdate(BaseModel):
     cumulative_duration_probability: Optional[float] = None
     action: Optional[str] = None
     id_cs: Optional[UUID] = None
+    policy: Optional[str] = None
 
 class ActionsRead(BaseModel):
     id: UUID
@@ -214,4 +240,5 @@ class ActionsRead(BaseModel):
     cumulative_duration_probability: float
     action: str
     id_cs: Optional[UUID]
+    policy: Optional[str]
     model_config = ConfigDict(from_attributes=True)
