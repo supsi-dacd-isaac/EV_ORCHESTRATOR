@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.db.session import SessionLocal
 from app.models import Owners
+from app.services.common.auth import hash_password
 import uuid
-from datetime import datetime
 
 router = APIRouter(prefix="/owners", tags=["owners"])
 
@@ -36,9 +36,8 @@ def create_owner(owner: CreateOwnerRequest):
         new_owner = Owners(
             id=uuid.uuid4(),
             user=owner.user,
-            password=owner.password,
+            password=hash_password(owner.password),
             company_name=owner.company_name,
-            updated_at=datetime.utcnow(),
         )
         db.add(new_owner)
         db.commit()
@@ -50,6 +49,9 @@ def create_owner(owner: CreateOwnerRequest):
             "company_name": new_owner.company_name,
             "updated_at": new_owner.updated_at,
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -78,11 +80,10 @@ def update_owner(owner_uuid: str, owner_data: UpdateOwnerRequest):
 
         # Update fields if provided
         if owner_data.password:
-            owner.password = owner_data.password
+            owner.password = hash_password(owner_data.password)
         if owner_data.company_name:
             owner.company_name = owner_data.company_name
 
-        owner.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(owner)
 

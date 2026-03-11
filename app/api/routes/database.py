@@ -14,6 +14,7 @@ from app.schemas.database import (
     PilotCreate, PilotUpdate, PilotRead,
     GridLoadForecastedCreate, GridLoadForecastedUpdate, GridLoadForecastedRead,
 )
+from app.services.common.auth import hash_password
 
 router = APIRouter(prefix="/db", tags=["database"])
 
@@ -29,7 +30,7 @@ def create_owner(payload: OwnersCreate):
         obj = Owners(
             id=uuid4(),
             user=payload.user,
-            password=payload.password,
+            password=hash_password(payload.password),
             company_name=payload.company_name,
             type=payload.type,
             role=payload.role,
@@ -72,6 +73,10 @@ def update_owner(owner_id: UUID, payload: OwnersUpdate):
             raise HTTPException(status_code=404, detail="Owner not found")
 
         data = payload.dict(exclude_unset=True)
+        # Exclude updated_at from being set explicitly (let DB handle it)
+        data.pop('updated_at', None)
+        if 'password' in data and data['password']:
+            data['password'] = hash_password(data['password'])
         for k, v in data.items():
             setattr(obj, k, v)
         db.commit()
