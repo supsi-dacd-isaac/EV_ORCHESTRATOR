@@ -20,9 +20,7 @@ class VehicleConnectedEvent(BaseModel):
     charger_id: str
     timestamp: datetime
     measured_power_kw: float
-    charger_nom_power_kw: float
     is_fully_charged: bool
-    controlled_charging_points: int
 
 class ChargingUpdateEvent(BaseModel):
     charger_id: str
@@ -49,6 +47,15 @@ def vehicle_connected(event: VehicleConnectedEvent):
         charger = db.query(Chargers).filter(Chargers.id == event.charger_id).first()
         if not charger:
             raise HTTPException(status_code=404, detail="Charger not found. You need to register it before starting a session, use create_charger endpoint.")
+
+        # 0b. Identify pilot for this charger and count its chargers
+        pilot = None
+        controlled_charging_points = 1  # default to 1 if no pilot
+        if charger.id_pilot:
+            pilot = db.query(Pilot).filter(Pilot.id == charger.id_pilot).first()
+            # Count chargers associated with this pilot
+            if pilot:
+                controlled_charging_points = db.query(Chargers).filter(Chargers.id_pilot == pilot.id).count()
 
         # 1. Check for active session in DB
         existing_session = (
@@ -84,6 +91,7 @@ def vehicle_connected(event: VehicleConnectedEvent):
                 forecasted_energy_kwh_std=existing_session.forecasted_energy_kwh_std,
                 forecasted_duration_hours_std=existing_session.forecasted_duration_hours_std,
             )
+            db.commit()
 
             return {
                 "warning": f"Session already active ({existing_session.id}) for this charger. Please check and use charging_update endpoint for getting new actions.",
@@ -110,13 +118,12 @@ def vehicle_connected(event: VehicleConnectedEvent):
             forecasted_energy_kwh_std=forecasted_energy_kwh_std,
             forecasted_duration_hours=forecasted_duration_hours,
             forecasted_duration_hours_std=forecasted_duration_hours_std,
-            controlled_charging_points=event.controlled_charging_points,
+            controlled_charging_points=controlled_charging_points,
             active=True,
-            updated_at=datetime.utcnow(),
             id_charger=charger.id,
         )
         db.add(new_session)
-        db.commit()
+        db.flush()  # Send to DB to get ID, but don't commit yet
         db.refresh(new_session)
 
         # Call orchestrator
@@ -136,6 +143,7 @@ def vehicle_connected(event: VehicleConnectedEvent):
             forecasted_energy_kwh_std=new_session.forecasted_energy_kwh_std,
             forecasted_duration_hours_std=new_session.forecasted_duration_hours_std,
         )
+        db.commit()
 
         return {"action": action, "session_id": str(new_session.id)}
 
@@ -167,11 +175,16 @@ def charging_update(event: ChargingUpdateEvent):
         if session is None:
             raise HTTPException(status_code=404, detail=f"No active session for charger {event.charger_id}")
 
+        # 1b. Get charger and identify pilot for this charger
+        charger = db.query(Chargers).filter(Chargers.id == event.charger_id).first()
+        pilot = None
+        if charger and charger.id_pilot:
+            pilot = db.query(Pilot).filter(Pilot.id == charger.id_pilot).first()
+
         # 2. Update session dynamic state
         session.energy_delivered_kwh += event.energy_delivered_kwh
         # session.avg_measured_power_kw = event.avg_power_last_15min_kw
         session.is_fully_charged = event.is_fully_charged
-        session.last_update_time = event.timestamp
         if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
             session.end_charging_time = event.timestamp
 
@@ -232,10 +245,9 @@ def vehicle_disconnected(event: VehicleDisconnectedEvent):
         session.end_time = event.timestamp
         session.duration = (session.end_time - session.start_time).total_seconds()/3600
         session.active = False
-        session.updated_at = datetime.utcnow()
 
-        # persist changes
-        db.commit()
+        # persist changes (but don't commit yet)
+        db.flush()
 
         session_summary = {
             "charger_id": session.id_charger,
@@ -253,6 +265,7 @@ def vehicle_disconnected(event: VehicleDisconnectedEvent):
         duration_hours = session.duration
 
         update_ev_forecast(
+            db=db,
             charger_id=session.id_charger,
             start_time=session.start_time,
             energy_kwh=session.energy_delivered_kwh,
@@ -260,10 +273,14 @@ def vehicle_disconnected(event: VehicleDisconnectedEvent):
         )
 
         update_ev_duration_cdf(
+            db=db,
             charger_id=session.id_charger,
             start_time=session.start_time,
             duration_hours=duration_hours,
         )
+
+        # Commit all changes atomically (session closure + both forecasting updates)
+        db.commit()
 
         return {
             "status": "session closed and stored",
@@ -318,6 +335,113 @@ def get_active_sessions():
             }
 
         return result
+    finally:
+        db.close()
+
+@router.get("/active_sessions/pilot/{pilot_id}")
+def get_active_sessions_by_pilot(pilot_id: str):
+    """
+    Return all charging sessions currently active for a specific pilot
+    """
+    db = SessionLocal()
+    try:
+        # Verify pilot exists
+        pilot = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+        if not pilot:
+            raise HTTPException(status_code=404, detail=f"Pilot {pilot_id} not found")
+
+        # Get active sessions for chargers associated with this pilot
+        sessions = (
+            db.query(ChargingSessions)
+            .join(Chargers, ChargingSessions.id_charger == Chargers.id)
+            .filter(Chargers.id_pilot == pilot_id, ChargingSessions.active == True)
+            .all()
+        )
+
+        result = {}
+        for s in sessions:
+            # latest action for this session (if any)
+            latest_action = (
+                db.query(Actions)
+                .filter(Actions.id_cs == s.id)
+                .order_by(Actions.current_time.desc())
+                .first()
+            )
+
+            avg_measured_power = latest_action.current_power_kw if latest_action else None
+            is_fully = latest_action.is_fully_charged if latest_action else None
+            last_update = latest_action.current_time if latest_action else s.updated_at
+
+            result[str(s.id)] = {
+                "charger_id": (str(s.id_charger) if s.id_charger else None),
+                "start_time": s.start_time,
+                "energy_delivered_kwh": s.energy_delivered_kwh,
+                "forecasted_energy_kwh": s.forecasted_energy_kwh,
+                "forecasted_duration_hours": s.forecasted_duration_hours,
+                "avg_measured_power_kw": avg_measured_power,
+                "is_fully_charged": is_fully,
+                "last_update_time": last_update,
+            }
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.get("/active_sessions/owner/{owner_id}")
+def get_active_sessions_by_owner(owner_id: str):
+    """
+    Return all charging sessions currently active for a specific owner
+    """
+    db = SessionLocal()
+    try:
+        # Verify owner exists
+        owner = db.query(Owners).filter(Owners.id == owner_id).first()
+        if not owner:
+            raise HTTPException(status_code=404, detail=f"Owner {owner_id} not found")
+
+        # Get active sessions for chargers associated with this owner
+        sessions = (
+            db.query(ChargingSessions)
+            .join(Chargers, ChargingSessions.id_charger == Chargers.id)
+            .filter(Chargers.id_owner == owner_id, ChargingSessions.active == True)
+            .all()
+        )
+
+        result = {}
+        for s in sessions:
+            # latest action for this session (if any)
+            latest_action = (
+                db.query(Actions)
+                .filter(Actions.id_cs == s.id)
+                .order_by(Actions.current_time.desc())
+                .first()
+            )
+
+            avg_measured_power = latest_action.current_power_kw if latest_action else None
+            is_fully = latest_action.is_fully_charged if latest_action else None
+            last_update = latest_action.current_time if latest_action else s.updated_at
+
+            result[str(s.id)] = {
+                "charger_id": (str(s.id_charger) if s.id_charger else None),
+                "start_time": s.start_time,
+                "energy_delivered_kwh": s.energy_delivered_kwh,
+                "forecasted_energy_kwh": s.forecasted_energy_kwh,
+                "forecasted_duration_hours": s.forecasted_duration_hours,
+                "avg_measured_power_kw": avg_measured_power,
+                "is_fully_charged": is_fully,
+                "last_update_time": last_update,
+            }
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 

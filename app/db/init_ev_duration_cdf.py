@@ -1,4 +1,3 @@
-from datetime import datetime
 import uuid
 from app.db.session import SessionLocal
 from app.models import EvDurationCdf

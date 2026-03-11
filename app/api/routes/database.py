@@ -211,6 +211,24 @@ def list_sessions():
         db.close()
 
 
+@router.get("/sessions/owner/{owner_id}", response_model=list[ChargingSessionsRead])
+def list_sessions_by_owner(owner_id: UUID):
+    db = SessionLocal()
+    try:
+        owner = db.query(Owners).filter(Owners.id == owner_id).first()
+        if not owner:
+            raise HTTPException(status_code=404, detail="Owner not found")
+
+        return (
+            db.query(ChargingSessions)
+            .join(Chargers, ChargingSessions.id_charger == Chargers.id)
+            .filter(Chargers.id_owner == owner_id)
+            .all()
+        )
+    finally:
+        db.close()
+
+
 @router.get("/sessions/{session_id}", response_model=ChargingSessionsRead)
 def get_session(session_id: UUID):
     db = SessionLocal()
@@ -236,7 +254,6 @@ def update_session(session_id: UUID, payload: ChargingSessionsUpdate):
         data.pop('updated_at', None)
         for k, v in data.items():
             setattr(obj, k, v)
-        obj.updated_at = data.get('updated_at', datetime.utcnow())
         db.commit()
         db.refresh(obj)
         return obj
@@ -362,6 +379,19 @@ def list_actions():
         db.close()
 
 
+@router.get("/actions/session/{session_id}", response_model=list[ActionsRead])
+def list_actions_by_session(session_id: UUID):
+    db = SessionLocal()
+    try:
+        session = db.query(ChargingSessions).filter(ChargingSessions.id == session_id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return db.query(Actions).filter(Actions.id_cs == session_id).all()
+    finally:
+        db.close()
+
+
 @router.get("/actions/{action_id}", response_model=ActionsRead)
 def get_action(action_id: UUID):
     db = SessionLocal()
@@ -417,7 +447,6 @@ def create_duration(payload: EvDurationCdfCreate):
             horizon_hours=payload.horizon_hours,
             probability=payload.probability,
             sample_count=payload.sample_count,
-            updated_at=payload.updated_at,
             id_charger=payload.id_charger,
         )
         db.add(obj)
@@ -496,7 +525,6 @@ def create_ev_forecast(payload: EvForecastStatsCreate):
             mean_duration_hours=payload.mean_duration_hours,
             std_duration_hours=payload.std_duration_hours,
             sample_count=payload.sample_count,
-            updated_at=payload.updated_at,
             id_charger=payload.id_charger,
         )
         db.add(obj)

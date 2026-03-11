@@ -29,6 +29,7 @@ def update_ev_forecast(
 ):
     """
     Update EV forecast statistics after a completed charging session.
+    Does NOT commit - caller is responsible for commit.
     """
 
     hour = start_time.hour
