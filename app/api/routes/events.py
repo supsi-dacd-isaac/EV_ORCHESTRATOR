@@ -6,7 +6,7 @@ import json
 
 
 from app.db.session import SessionLocal
-from app.models import Chargers, ChargingSessions, Actions
+from app.models import Chargers, ChargingSessions, Actions, Pilot, Owners
 
 from app.services.ev_forecast.query import get_ev_forecast
 from app.services.load_forecast.load_forecaster_service import forecast_load

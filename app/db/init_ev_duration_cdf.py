@@ -17,7 +17,6 @@ def init_ev_duration_cdf(charger_id: str):
                     horizon_hours=horizon,
                     probability=prob,
                     sample_count=sample_count,
-                    updated_at=datetime.utcnow(),
                 )
             )
         db.commit()

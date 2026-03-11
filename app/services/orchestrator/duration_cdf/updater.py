@@ -79,7 +79,6 @@ def _initialize_cdf_from_sessions(
             horizon_hours=horizon,
             probability=prob,
             sample_count=n,
-            updated_at=datetime.utcnow(),
             id_charger=charger_id,
         )
         for horizon, (prob, n) in cdf.items()

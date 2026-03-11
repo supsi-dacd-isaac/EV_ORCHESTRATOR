@@ -13,7 +13,6 @@ class ChargersCreate(BaseModel):
     longitude: float
     nominal_power: float
     plugs: str
-    updated_at: datetime
     id_owner: Optional[UUID] = None
     id_pilot: Optional[UUID] = None
 
@@ -51,7 +50,6 @@ class ChargingSessionsCreate(BaseModel):
     forecasted_duration_hours_std: float
     controlled_charging_points: int
     active: bool
-    updated_at: datetime
     id_charger: Optional[UUID] = None
     end_time: Optional[datetime] = None
     end_charging_time: Optional[datetime] = None
@@ -109,7 +107,6 @@ class OwnersCreate(BaseModel):
     user: str
     password: str
     company_name: str
-    updated_at: datetime
     type: Optional[str] = None
     role: Optional[str] = None
 
@@ -137,7 +134,6 @@ class EvDurationCdfCreate(BaseModel):
     horizon_hours: float
     probability: float
     sample_count: int
-    updated_at: datetime
     id_charger: Optional[UUID] = None
 
 class EvDurationCdfUpdate(BaseModel):
@@ -181,7 +177,6 @@ class EvForecastStatsCreate(BaseModel):
     mean_duration_hours: float
     std_duration_hours: float
     sample_count: int
-    updated_at: datetime
     id_charger: Optional[UUID] = None
 
 class EvForecastStatsUpdate(BaseModel):

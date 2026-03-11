@@ -76,7 +76,6 @@ def update_ev_forecast(
             mean_duration_hours=mean_duration,
             std_duration_hours=sqrt(duration_var / n),
             sample_count=n,
-            updated_at=datetime.utcnow(),
             id_charger=charger_id,
         )
         db.add(new_stat)
@@ -133,7 +132,6 @@ def _update_or_initialize_stat(
             mean_duration_hours=duration_hours,
             std_duration_hours=0.0,
             sample_count=1,
-            updated_at=datetime.utcnow(),
             id_charger=charger_id,
         )
         db.add(stat)
@@ -158,7 +156,6 @@ def _update_or_initialize_stat(
         mean_duration_hours=mean_duration,
         std_duration_hours=sqrt(duration_var / n),
         sample_count=n,
-        updated_at=datetime.utcnow(),
         id_charger=charger_id,
     )
     db.add(stat)
@@ -187,7 +184,6 @@ def _initialize_new_stat(
         mean_duration_hours=mean_duration,
         std_duration_hours=std_duration,
         sample_count= sample_count,
-        updated_at=datetime.utcnow(),
         id_charger=charger_id,
     )
     db.add(stat)

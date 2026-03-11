@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from datetime import datetime
 
 from app.db.session import SessionLocal
-from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats
+from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats, Pilot, GridLoadForecasted
 from app.schemas.database import (
     OwnersCreate, OwnersUpdate, OwnersRead,
     ChargersCreate, ChargersUpdate, ChargersRead,
@@ -11,6 +11,8 @@ from app.schemas.database import (
     ActionsCreate, ActionsUpdate, ActionsRead,
     EvDurationCdfCreate, EvDurationCdfUpdate, EvDurationCdfRead,
     EvForecastStatsCreate, EvForecastStatsUpdate, EvForecastStatsRead,
+    PilotCreate, PilotUpdate, PilotRead,
+    GridLoadForecastedCreate, GridLoadForecastedUpdate, GridLoadForecastedRead,
 )
 
 router = APIRouter(prefix="/db", tags=["database"])
@@ -29,7 +31,8 @@ def create_owner(payload: OwnersCreate):
             user=payload.user,
             password=payload.password,
             company_name=payload.company_name,
-            updated_at=payload.updated_at,
+            type=payload.type,
+            role=payload.role,
         )
         db.add(obj)
         db.commit()
@@ -71,7 +74,6 @@ def update_owner(owner_id: UUID, payload: OwnersUpdate):
         data = payload.dict(exclude_unset=True)
         for k, v in data.items():
             setattr(obj, k, v)
-        obj.updated_at = data.get('updated_at', datetime.utcnow())
         db.commit()
         db.refresh(obj)
         return obj
@@ -106,8 +108,8 @@ def create_charger(payload: ChargersCreate):
             longitude=payload.longitude,
             nominal_power=payload.nominal_power,
             plugs=payload.plugs,
-            updated_at=payload.updated_at,
             id_owner=payload.id_owner,
+            id_pilot=payload.id_pilot,
         )
         db.add(obj)
         db.commit()
@@ -147,9 +149,10 @@ def update_charger(charger_id: UUID, payload: ChargersUpdate):
             raise HTTPException(status_code=404, detail="Charger not found")
 
         data = payload.dict(exclude_unset=True)
+        # Exclude updated_at from being set explicitly (let DB handle it)
+        data.pop('updated_at', None)
         for k, v in data.items():
             setattr(obj, k, v)
-        obj.updated_at = data.get('updated_at', datetime.utcnow())
         db.commit()
         db.refresh(obj)
         return obj
@@ -179,9 +182,6 @@ def create_session(payload: ChargingSessionsCreate):
         obj = ChargingSessions(
             id=uuid4(),
             start_time=payload.start_time,
-            end_time=payload.end_time,
-            end_charging_time=payload.end_charging_time,
-            duration=payload.duration,
             energy_delivered_kwh=payload.energy_delivered_kwh,
             forecasted_energy_kwh=payload.forecasted_energy_kwh,
             forecasted_energy_kwh_std=payload.forecasted_energy_kwh_std,
@@ -189,8 +189,10 @@ def create_session(payload: ChargingSessionsCreate):
             forecasted_duration_hours_std=payload.forecasted_duration_hours_std,
             controlled_charging_points=payload.controlled_charging_points,
             active=payload.active,
-            updated_at=payload.updated_at,
             id_charger=payload.id_charger,
+            end_time=payload.end_time,
+            end_charging_time=payload.end_charging_time,
+            duration=payload.duration,
         )
         db.add(obj)
         db.commit()
@@ -230,6 +232,8 @@ def update_session(session_id: UUID, payload: ChargingSessionsUpdate):
             raise HTTPException(status_code=404, detail="Session not found")
 
         data = payload.dict(exclude_unset=True)
+        # Exclude updated_at from being set explicitly (let DB handle it)
+        data.pop('updated_at', None)
         for k, v in data.items():
             setattr(obj, k, v)
         obj.updated_at = data.get('updated_at', datetime.utcnow())
@@ -253,6 +257,76 @@ def delete_session(session_id: UUID):
     finally:
         db.close()
 
+
+# ---------- Pilot ----------
+@router.post("/pilots", response_model=PilotRead)
+def create_pilot(payload: PilotCreate):
+    db = SessionLocal()
+    try:
+        obj = Pilot(
+            id=uuid4(),
+            name=payload.name,
+            id_owner=payload.id_owner,
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.get("/pilots", response_model=list[PilotRead])
+def list_pilots():
+    db = SessionLocal()
+    try:
+        return db.query(Pilot).all()
+    finally:
+        db.close()
+
+
+@router.get("/pilots/{pilot_id}", response_model=PilotRead)
+def get_pilot(pilot_id: UUID):
+    db = SessionLocal()
+    try:
+        obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+        return obj
+    finally:
+        db.close()
+
+
+@router.put("/pilots/{pilot_id}", response_model=PilotRead)
+def update_pilot(pilot_id: UUID, payload: PilotUpdate):
+    db = SessionLocal()
+    try:
+        obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+
+        data = payload.dict(exclude_unset=True)
+        for k, v in data.items():
+            setattr(obj, k, v)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.delete("/pilots/{pilot_id}")
+def delete_pilot(pilot_id: UUID):
+    db = SessionLocal()
+    try:
+        obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+        db.delete(obj)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
 
 # ---------- Actions ----------
 @router.post("/actions", response_model=ActionsRead)
@@ -384,6 +458,8 @@ def update_duration(duration_id: UUID, payload: EvDurationCdfUpdate):
             raise HTTPException(status_code=404, detail="Duration CDF not found")
 
         data = payload.dict(exclude_unset=True)
+        # Exclude updated_at from being set explicitly (let DB handle it)
+        data.pop('updated_at', None)
         for k, v in data.items():
             setattr(obj, k, v)
         db.commit()
@@ -461,6 +537,8 @@ def update_ev_forecast(forecast_id: UUID, payload: EvForecastStatsUpdate):
             raise HTTPException(status_code=404, detail="EV forecast stat not found")
 
         data = payload.dict(exclude_unset=True)
+        # Exclude updated_at from being set explicitly (let DB handle it)
+        data.pop('updated_at', None)
         for k, v in data.items():
             setattr(obj, k, v)
         db.commit()
@@ -477,6 +555,77 @@ def delete_ev_forecast(forecast_id: UUID):
         obj = db.query(EvForecastStats).filter(EvForecastStats.id == forecast_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="EV forecast stat not found")
+        db.delete(obj)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ---------- Grid Load Forecasted ----------
+@router.post("/grid_load_forecasted", response_model=GridLoadForecastedRead)
+def create_grid_load_forecasted(payload: GridLoadForecastedCreate):
+    db = SessionLocal()
+    try:
+        obj = GridLoadForecasted(
+            id=uuid4(),
+            value=payload.value,
+            id_action=payload.id_action,
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.get("/grid_load_forecasted", response_model=list[GridLoadForecastedRead])
+def list_grid_load_forecasted():
+    db = SessionLocal()
+    try:
+        return db.query(GridLoadForecasted).all()
+    finally:
+        db.close()
+
+
+@router.get("/grid_load_forecasted/{grid_load_id}", response_model=GridLoadForecastedRead)
+def get_grid_load_forecasted(grid_load_id: UUID):
+    db = SessionLocal()
+    try:
+        obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Grid load forecasted not found")
+        return obj
+    finally:
+        db.close()
+
+
+@router.put("/grid_load_forecasted/{grid_load_id}", response_model=GridLoadForecastedRead)
+def update_grid_load_forecasted(grid_load_id: UUID, payload: GridLoadForecastedUpdate):
+    db = SessionLocal()
+    try:
+        obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Grid load forecasted not found")
+
+        data = payload.dict(exclude_unset=True)
+        for k, v in data.items():
+            setattr(obj, k, v)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.delete("/grid_load_forecasted/{grid_load_id}")
+def delete_grid_load_forecasted(grid_load_id: UUID):
+    db = SessionLocal()
+    try:
+        obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Grid load forecasted not found")
         db.delete(obj)
         db.commit()
         return {"ok": True}

@@ -1,4 +1,3 @@
-from datetime import datetime
 import uuid
 from app.db.session import SessionLocal
 from app.models import EvForecastStats
@@ -21,7 +20,6 @@ def init_ev_forecast(charger_id: str):
                 mean_duration_hours=mean_duration,
                 std_duration_hours=std_duration,
                 sample_count=sample_count,
-                updated_at=datetime.utcnow()
             )
             db.add(stat)
         db.commit()

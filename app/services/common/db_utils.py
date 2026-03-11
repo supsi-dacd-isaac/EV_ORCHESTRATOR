@@ -35,12 +35,13 @@ def completed_sessions_count(
     hour: int,
 ) -> int:
     """
-    Count completed charging sessions for a charger.
+    Count COMPLETED charging sessions for a charger (end_time is not null).
     If hour == -1, count sessions across all hours.
     """
 
     query = db.query(ChargingSessions).filter(
-        ChargingSessions.id_charger == charger_id
+        ChargingSessions.id_charger == charger_id,
+        ChargingSessions.end_time.isnot(None)  # Only count completed sessions
     )
 
     if hour != -1:
