@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import uuid4
@@ -13,6 +13,15 @@ from app.services.load_forecast.load_forecaster_service import forecast_load
 from app.services.orchestrator.orchestrator_service import compute_and_save_action
 from app.services.ev_forecast.updater import update_ev_forecast
 from app.services.orchestrator.duration_cdf.updater import update_ev_duration_cdf
+from app.services.common.auth import TokenData, get_current_user
+from app.services.common.authorization import (
+    ensure_charger_access,
+    ensure_pilot_access,
+    get_accessible_charger_ids,
+    is_admin,
+    require_admin_or_owner,
+    require_roles,
+)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -37,7 +46,10 @@ class VehicleDisconnectedEvent(BaseModel):
     is_fully_charged: bool
 
 @router.post("/vehicle_connected")
-def vehicle_connected(event: VehicleConnectedEvent):
+def vehicle_connected(
+    event: VehicleConnectedEvent,
+    current_user: TokenData = Depends(get_current_user),
+):
     """
     Called when a vehicle plugs in.
     """
@@ -47,6 +59,14 @@ def vehicle_connected(event: VehicleConnectedEvent):
         charger = db.query(Chargers).filter(Chargers.id == event.charger_id).first()
         if not charger:
             raise HTTPException(status_code=404, detail="Charger not found. You need to register it before starting a session, use create_charger endpoint.")
+        ensure_charger_access(
+            db,
+            current_user,
+            charger.id,
+            allow_charger_owner=True,
+            allow_pilot_owner=False,
+            allow_guest=False,
+        )
 
         # 0b. Identify pilot for this charger and count its chargers
         pilot = None
@@ -157,7 +177,10 @@ def vehicle_connected(event: VehicleConnectedEvent):
         db.close()
 
 @router.post("/charging_update")
-def charging_update(event: ChargingUpdateEvent):
+def charging_update(
+    event: ChargingUpdateEvent,
+    current_user: TokenData = Depends(get_current_user),
+):
     """
     Called when a new action for the charger is needed
     """
@@ -174,6 +197,15 @@ def charging_update(event: ChargingUpdateEvent):
 
         if session is None:
             raise HTTPException(status_code=404, detail=f"No active session for charger {event.charger_id}")
+
+        ensure_charger_access(
+            db,
+            current_user,
+            session.id_charger,
+            allow_charger_owner=True,
+            allow_pilot_owner=False,
+            allow_guest=False,
+        )
 
         # 1b. Get charger and identify pilot for this charger
         charger = db.query(Chargers).filter(Chargers.id == event.charger_id).first()
@@ -222,7 +254,10 @@ def charging_update(event: ChargingUpdateEvent):
         db.close()
 
 @router.post("/vehicle_disconnected")
-def vehicle_disconnected(event: VehicleDisconnectedEvent):
+def vehicle_disconnected(
+    event: VehicleDisconnectedEvent,
+    current_user: TokenData = Depends(get_current_user),
+):
     """
     Called when a vehicles disconnects
     """
@@ -237,6 +272,15 @@ def vehicle_disconnected(event: VehicleDisconnectedEvent):
         )
         if session is None:
             raise HTTPException(status_code=404, detail=f"No active session for charger {event.charger_id}")
+
+        ensure_charger_access(
+            db,
+            current_user,
+            session.id_charger,
+            allow_charger_owner=True,
+            allow_pilot_owner=False,
+            allow_guest=False,
+        )
 
         # 2. Update session final state
         session.energy_delivered_kwh = session.energy_delivered_kwh + event.energy_delivered_kwh
@@ -297,7 +341,7 @@ def vehicle_disconnected(event: VehicleDisconnectedEvent):
         db.close()
 
 @router.get("/active_sessions")
-def get_active_sessions():
+def get_active_sessions(current_user: TokenData = Depends(get_current_user)):
     """
     Return all charging sessions currently active
     """
@@ -308,6 +352,10 @@ def get_active_sessions():
             .filter(ChargingSessions.active == True)
             .all()
         )
+
+        if not is_admin(current_user):
+            charger_ids = set(get_accessible_charger_ids(db, current_user, allow_guest=False))
+            sessions = [s for s in sessions if s.id_charger in charger_ids]
 
         result = {}
         for s in sessions:
@@ -339,16 +387,24 @@ def get_active_sessions():
         db.close()
 
 @router.get("/active_sessions/pilot/{pilot_id}")
-def get_active_sessions_by_pilot(pilot_id: str):
+def get_active_sessions_by_pilot(
+    pilot_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
     """
     Return all charging sessions currently active for a specific pilot
     """
     db = SessionLocal()
     try:
         # Verify pilot exists
-        pilot = db.query(Pilot).filter(Pilot.id == pilot_id).first()
-        if not pilot:
-            raise HTTPException(status_code=404, detail=f"Pilot {pilot_id} not found")
+        pilot = ensure_pilot_access(
+            db,
+            current_user,
+            pilot_id,
+            allow_user=True,
+            allow_guest=False,
+            require_user_ownership=True,
+        )
 
         # Get active sessions for chargers associated with this pilot
         sessions = (
@@ -393,7 +449,10 @@ def get_active_sessions_by_pilot(pilot_id: str):
 
 
 @router.get("/active_sessions/owner/{owner_id}")
-def get_active_sessions_by_owner(owner_id: str):
+def get_active_sessions_by_owner(
+    owner_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
     """
     Return all charging sessions currently active for a specific owner
     """
@@ -403,6 +462,10 @@ def get_active_sessions_by_owner(owner_id: str):
         owner = db.query(Owners).filter(Owners.id == owner_id).first()
         if not owner:
             raise HTTPException(status_code=404, detail=f"Owner {owner_id} not found")
+
+        if not is_admin(current_user):
+            require_roles(current_user, "user")
+        require_admin_or_owner(current_user, owner.id)
 
         # Get active sessions for chargers associated with this owner
         sessions = (

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from uuid import UUID, uuid4
 from datetime import datetime
 
@@ -14,15 +14,29 @@ from app.schemas.database import (
     PilotCreate, PilotUpdate, PilotRead,
     GridLoadForecastedCreate, GridLoadForecastedUpdate, GridLoadForecastedRead,
 )
-from app.services.common.auth import hash_password
+from app.services.common.auth import TokenData, get_current_user, hash_password
+from app.services.common.authorization import (
+    ensure_action_access,
+    ensure_charger_access,
+    ensure_pilot_access,
+    ensure_session_access,
+    get_accessible_charger_ids,
+    get_role,
+    is_admin,
+    is_user_role,
+    require_admin,
+    require_admin_or_owner,
+    require_roles,
+)
 
 router = APIRouter(prefix="/db", tags=["database"])
 
 # ---------- Owners ----------
 @router.post("/owners", response_model=OwnersRead)
-def create_owner(payload: OwnersCreate):
+def create_owner(payload: OwnersCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         existing = db.query(Owners).filter(Owners.user == payload.user).first()
         if existing:
             raise HTTPException(status_code=400, detail="User already exists")
@@ -43,19 +57,21 @@ def create_owner(payload: OwnersCreate):
         db.close()
 
 
-@router.get("/owners", response_model=list[OwnersRead])
-def list_owners():
+@router.get("/owners", response_model=list[OwnersRead], response_model_exclude={"password"})
+def list_owners(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_roles(current_user, "admin", "user", "guest")
         return db.query(Owners).all()
     finally:
         db.close()
 
 
-@router.get("/owners/{owner_id}", response_model=OwnersRead)
-def get_owner(owner_id: UUID):
+@router.get("/owners/{owner_id}", response_model=OwnersRead, response_model_exclude={"password"})
+def get_owner(owner_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_roles(current_user, "admin", "user", "guest")
         obj = db.query(Owners).filter(Owners.id == owner_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Owner not found")
@@ -65,16 +81,26 @@ def get_owner(owner_id: UUID):
 
 
 @router.put("/owners/{owner_id}", response_model=OwnersRead)
-def update_owner(owner_id: UUID, payload: OwnersUpdate):
+def update_owner(
+    owner_id: UUID,
+    payload: OwnersUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin_or_owner(current_user, owner_id)
         obj = db.query(Owners).filter(Owners.id == owner_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Owner not found")
 
+        if not is_admin(current_user) and payload.role is not None and payload.role != obj.role:
+            raise HTTPException(status_code=403, detail="Role change forbidden for non-admin users")
+
         data = payload.dict(exclude_unset=True)
         # Exclude updated_at from being set explicitly (let DB handle it)
         data.pop('updated_at', None)
+        if not is_admin(current_user):
+            data.pop('role', None)
         if 'password' in data and data['password']:
             data['password'] = hash_password(data['password'])
         for k, v in data.items():
@@ -87,9 +113,10 @@ def update_owner(owner_id: UUID, payload: OwnersUpdate):
 
 
 @router.delete("/owners/{owner_id}")
-def delete_owner(owner_id: UUID):
+def delete_owner(owner_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(Owners).filter(Owners.id == owner_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Owner not found")
@@ -102,9 +129,17 @@ def delete_owner(owner_id: UUID):
 
 # ---------- Chargers ----------
 @router.post("/chargers", response_model=ChargersRead)
-def create_charger(payload: ChargersCreate):
+def create_charger(payload: ChargersCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        role = get_role(current_user)
+        if role == "guest":
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if is_user_role(current_user):
+            if not payload.id_pilot:
+                raise HTTPException(status_code=403, detail="Forbidden") # TODO - check
+            ensure_pilot_access(db, current_user, payload.id_pilot)
+
         obj = Chargers(
             id=uuid4(),
             name=payload.name,
@@ -125,33 +160,44 @@ def create_charger(payload: ChargersCreate):
 
 
 @router.get("/chargers", response_model=list[ChargersRead])
-def list_chargers():
+def list_chargers(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        return db.query(Chargers).all()
+        if is_admin(current_user):
+            return db.query(Chargers).all()
+        charger_ids = get_accessible_charger_ids(db, current_user, allow_guest=False)
+        if not charger_ids:
+            return []
+        return db.query(Chargers).filter(Chargers.id.in_(charger_ids)).all()
     finally:
         db.close()
 
 
 @router.get("/chargers/{charger_id}", response_model=ChargersRead)
-def get_charger(charger_id: UUID):
+def get_charger(charger_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        obj = db.query(Chargers).filter(Chargers.id == charger_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Charger not found")
-        return obj
+        return ensure_charger_access(db, current_user, charger_id)
     finally:
         db.close()
 
 
 @router.put("/chargers/{charger_id}", response_model=ChargersRead)
-def update_charger(charger_id: UUID, payload: ChargersUpdate):
+def update_charger(
+    charger_id: UUID,
+    payload: ChargersUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
-        obj = db.query(Chargers).filter(Chargers.id == charger_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Charger not found")
+        obj = ensure_charger_access(
+            db,
+            current_user,
+            charger_id,
+            allow_charger_owner=False,
+            allow_pilot_owner=True,
+            allow_guest=False,
+        )
 
         data = payload.dict(exclude_unset=True)
         # Exclude updated_at from being set explicitly (let DB handle it)
@@ -166,12 +212,22 @@ def update_charger(charger_id: UUID, payload: ChargersUpdate):
 
 
 @router.delete("/chargers/{charger_id}")
-def delete_charger(charger_id: UUID):
+def delete_charger(charger_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        obj = db.query(Chargers).filter(Chargers.id == charger_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Charger not found")
+        if is_admin(current_user):
+            obj = db.query(Chargers).filter(Chargers.id == charger_id).first()
+            if not obj:
+                raise HTTPException(status_code=404, detail="Charger not found")
+        else:
+            obj = ensure_charger_access(
+                db,
+                current_user,
+                charger_id,
+                allow_charger_owner=False,
+                allow_pilot_owner=True,
+                allow_guest=False,
+            )
         db.delete(obj)
         db.commit()
         return {"ok": True}
@@ -181,9 +237,10 @@ def delete_charger(charger_id: UUID):
 
 # ---------- Charging Sessions ----------
 @router.post("/sessions", response_model=ChargingSessionsRead)
-def create_session(payload: ChargingSessionsCreate):
+def create_session(payload: ChargingSessionsCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = ChargingSessions(
             id=uuid4(),
             start_time=payload.start_time,
@@ -208,48 +265,37 @@ def create_session(payload: ChargingSessionsCreate):
 
 
 @router.get("/sessions", response_model=list[ChargingSessionsRead])
-def list_sessions():
+def list_sessions(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        return db.query(ChargingSessions).all()
-    finally:
-        db.close()
-
-
-@router.get("/sessions/owner/{owner_id}", response_model=list[ChargingSessionsRead])
-def list_sessions_by_owner(owner_id: UUID):
-    db = SessionLocal()
-    try:
-        owner = db.query(Owners).filter(Owners.id == owner_id).first()
-        if not owner:
-            raise HTTPException(status_code=404, detail="Owner not found")
-
-        return (
-            db.query(ChargingSessions)
-            .join(Chargers, ChargingSessions.id_charger == Chargers.id)
-            .filter(Chargers.id_owner == owner_id)
-            .all()
-        )
+        if (current_user.role or "").lower() == "admin":
+            return db.query(ChargingSessions).all()
+        charger_ids = get_accessible_charger_ids(db, current_user, allow_guest=False)
+        if not charger_ids:
+            return []
+        return db.query(ChargingSessions).filter(ChargingSessions.id_charger.in_(charger_ids)).all()
     finally:
         db.close()
 
 
 @router.get("/sessions/{session_id}", response_model=ChargingSessionsRead)
-def get_session(session_id: UUID):
+def get_session(session_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        obj = db.query(ChargingSessions).filter(ChargingSessions.id == session_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return obj
+        return ensure_session_access(db, current_user, session_id, allow_guest=False)
     finally:
         db.close()
 
 
 @router.put("/sessions/{session_id}", response_model=ChargingSessionsRead)
-def update_session(session_id: UUID, payload: ChargingSessionsUpdate):
+def update_session(
+    session_id: UUID,
+    payload: ChargingSessionsUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(ChargingSessions).filter(ChargingSessions.id == session_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -267,9 +313,10 @@ def update_session(session_id: UUID, payload: ChargingSessionsUpdate):
 
 
 @router.delete("/sessions/{session_id}")
-def delete_session(session_id: UUID):
+def delete_session(session_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(ChargingSessions).filter(ChargingSessions.id == session_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -282,9 +329,13 @@ def delete_session(session_id: UUID):
 
 # ---------- Pilot ----------
 @router.post("/pilots", response_model=PilotRead)
-def create_pilot(payload: PilotCreate):
+def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        if not is_admin(current_user):
+            require_roles(current_user, "user-adv")
+            if payload.id_owner != current_user.owner_id:
+                raise HTTPException(status_code=403, detail="Forbidden - you can only create pilots for your own owner ID")
         obj = Pilot(
             id=uuid4(),
             name=payload.name,
@@ -299,18 +350,20 @@ def create_pilot(payload: PilotCreate):
 
 
 @router.get("/pilots", response_model=list[PilotRead])
-def list_pilots():
+def list_pilots(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_roles(current_user, "admin", "user", "guest")
         return db.query(Pilot).all()
     finally:
         db.close()
 
 
 @router.get("/pilots/{pilot_id}", response_model=PilotRead)
-def get_pilot(pilot_id: UUID):
+def get_pilot(pilot_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_roles(current_user, "admin", "user", "guest")
         obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Pilot not found")
@@ -320,12 +373,21 @@ def get_pilot(pilot_id: UUID):
 
 
 @router.put("/pilots/{pilot_id}", response_model=PilotRead)
-def update_pilot(pilot_id: UUID, payload: PilotUpdate):
+def update_pilot(
+    pilot_id: UUID,
+    payload: PilotUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
-        obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Pilot not found")
+        obj = ensure_pilot_access(
+            db,
+            current_user,
+            pilot_id,
+            allow_user=True,
+            allow_guest=False,
+            require_user_ownership=True,
+        )
 
         data = payload.dict(exclude_unset=True)
         for k, v in data.items():
@@ -338,12 +400,23 @@ def update_pilot(pilot_id: UUID, payload: PilotUpdate):
 
 
 @router.delete("/pilots/{pilot_id}")
-def delete_pilot(pilot_id: UUID):
+def delete_pilot(pilot_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Pilot not found")
+        if is_admin(current_user):
+            obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+            if not obj:
+                raise HTTPException(status_code=404, detail="Pilot not found")
+        else:
+            # require_roles(current_user, "user-adv") TODO: check
+            obj = ensure_pilot_access(
+                db,
+                current_user,
+                pilot_id,
+                allow_user=True,
+                allow_guest=False,
+                require_user_ownership=True,
+            )
         db.delete(obj)
         db.commit()
         return {"ok": True}
@@ -352,9 +425,10 @@ def delete_pilot(pilot_id: UUID):
 
 # ---------- Actions ----------
 @router.post("/actions", response_model=ActionsRead)
-def create_action(payload: ActionsCreate):
+def create_action(payload: ActionsCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = Actions(
             id=uuid4(),
             current_time=payload.current_time,
@@ -376,43 +450,42 @@ def create_action(payload: ActionsCreate):
 
 
 @router.get("/actions", response_model=list[ActionsRead])
-def list_actions():
+def list_actions(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        return db.query(Actions).all()
-    finally:
-        db.close()
-
-
-@router.get("/actions/session/{session_id}", response_model=list[ActionsRead])
-def list_actions_by_session(session_id: UUID):
-    db = SessionLocal()
-    try:
-        session = db.query(ChargingSessions).filter(ChargingSessions.id == session_id).first()
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        return db.query(Actions).filter(Actions.id_cs == session_id).all()
+        if is_admin(current_user):
+            return db.query(Actions).all()
+        charger_ids = get_accessible_charger_ids(db, current_user, allow_guest=False)
+        if not charger_ids:
+            return []
+        return (
+            db.query(Actions)
+            .join(ChargingSessions, Actions.id_cs == ChargingSessions.id)
+            .filter(ChargingSessions.id_charger.in_(charger_ids))
+            .all()
+        )
     finally:
         db.close()
 
 
 @router.get("/actions/{action_id}", response_model=ActionsRead)
-def get_action(action_id: UUID):
+def get_action(action_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        obj = db.query(Actions).filter(Actions.id == action_id).first()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Action not found")
-        return obj
+        return ensure_action_access(db, current_user, action_id, allow_guest=False)
     finally:
         db.close()
 
 
 @router.put("/actions/{action_id}", response_model=ActionsRead)
-def update_action(action_id: UUID, payload: ActionsUpdate):
+def update_action(
+    action_id: UUID,
+    payload: ActionsUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(Actions).filter(Actions.id == action_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Action not found")
@@ -428,9 +501,10 @@ def update_action(action_id: UUID, payload: ActionsUpdate):
 
 
 @router.delete("/actions/{action_id}")
-def delete_action(action_id: UUID):
+def delete_action(action_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(Actions).filter(Actions.id == action_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Action not found")
@@ -443,9 +517,10 @@ def delete_action(action_id: UUID):
 
 # ---------- EV Duration CDF ----------
 @router.post("/duration_cdf", response_model=EvDurationCdfRead)
-def create_duration(payload: EvDurationCdfCreate):
+def create_duration(payload: EvDurationCdfCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = EvDurationCdf(
             id=uuid4(),
             hour=payload.hour,
@@ -463,18 +538,20 @@ def create_duration(payload: EvDurationCdfCreate):
 
 
 @router.get("/duration_cdf", response_model=list[EvDurationCdfRead])
-def list_duration():
+def list_duration(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         return db.query(EvDurationCdf).all()
     finally:
         db.close()
 
 
 @router.get("/duration_cdf/{duration_id}", response_model=EvDurationCdfRead)
-def get_duration(duration_id: UUID):
+def get_duration(duration_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(EvDurationCdf).filter(EvDurationCdf.id == duration_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Duration CDF not found")
@@ -484,9 +561,14 @@ def get_duration(duration_id: UUID):
 
 
 @router.put("/duration_cdf/{duration_id}", response_model=EvDurationCdfRead)
-def update_duration(duration_id: UUID, payload: EvDurationCdfUpdate):
+def update_duration(
+    duration_id: UUID,
+    payload: EvDurationCdfUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(EvDurationCdf).filter(EvDurationCdf.id == duration_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Duration CDF not found")
@@ -504,9 +586,10 @@ def update_duration(duration_id: UUID, payload: EvDurationCdfUpdate):
 
 
 @router.delete("/duration_cdf/{duration_id}")
-def delete_duration(duration_id: UUID):
+def delete_duration(duration_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(EvDurationCdf).filter(EvDurationCdf.id == duration_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Duration CDF not found")
@@ -519,9 +602,13 @@ def delete_duration(duration_id: UUID):
 
 # ---------- EV Forecast Stats ----------
 @router.post("/ev_forecast_stats", response_model=EvForecastStatsRead)
-def create_ev_forecast(payload: EvForecastStatsCreate):
+def create_ev_forecast(
+    payload: EvForecastStatsCreate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = EvForecastStats(
             id=uuid4(),
             hour=payload.hour,
@@ -541,30 +628,40 @@ def create_ev_forecast(payload: EvForecastStatsCreate):
 
 
 @router.get("/ev_forecast_stats", response_model=list[EvForecastStatsRead])
-def list_ev_forecast():
+def list_ev_forecast(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         return db.query(EvForecastStats).all()
     finally:
         db.close()
 
 
 @router.get("/ev_forecast_stats/{forecast_id}", response_model=EvForecastStatsRead)
-def get_ev_forecast(forecast_id: UUID):
-    db = SessionLocal()
+def get_ev_forecast(forecast_id: UUID, current_user: TokenData = Depends(get_current_user)):
+    db = SessionLocal() #TODO - no sense. the user has not access to forecast_id. The user should be able to track the forecast stats by charger id
     try:
         obj = db.query(EvForecastStats).filter(EvForecastStats.id == forecast_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="EV forecast stat not found")
+        if not is_admin(current_user):
+            if not obj.id_charger:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            ensure_charger_access(db, current_user, obj.id_charger, allow_guest=False)
         return obj
     finally:
         db.close()
 
 
 @router.put("/ev_forecast_stats/{forecast_id}", response_model=EvForecastStatsRead)
-def update_ev_forecast(forecast_id: UUID, payload: EvForecastStatsUpdate):
+def update_ev_forecast(
+    forecast_id: UUID,
+    payload: EvForecastStatsUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(EvForecastStats).filter(EvForecastStats.id == forecast_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="EV forecast stat not found")
@@ -582,9 +679,10 @@ def update_ev_forecast(forecast_id: UUID, payload: EvForecastStatsUpdate):
 
 
 @router.delete("/ev_forecast_stats/{forecast_id}")
-def delete_ev_forecast(forecast_id: UUID):
+def delete_ev_forecast(forecast_id: UUID, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(EvForecastStats).filter(EvForecastStats.id == forecast_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="EV forecast stat not found")
@@ -597,9 +695,13 @@ def delete_ev_forecast(forecast_id: UUID):
 
 # ---------- Grid Load Forecasted ----------
 @router.post("/grid_load_forecasted", response_model=GridLoadForecastedRead)
-def create_grid_load_forecasted(payload: GridLoadForecastedCreate):
+def create_grid_load_forecasted(
+    payload: GridLoadForecastedCreate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = GridLoadForecasted(
             id=uuid4(),
             value=payload.value,
@@ -614,30 +716,75 @@ def create_grid_load_forecasted(payload: GridLoadForecastedCreate):
 
 
 @router.get("/grid_load_forecasted", response_model=list[GridLoadForecastedRead])
-def list_grid_load_forecasted():
+def list_grid_load_forecasted(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        return db.query(GridLoadForecasted).all()
+        if is_admin(current_user):
+            return db.query(GridLoadForecasted).all()
+
+        require_roles(current_user, "user")
+        charger_ids = get_accessible_charger_ids(
+            db,
+            current_user,
+            allow_charger_owner=False,
+            allow_pilot_owner=True,
+            allow_guest=False,
+        )
+        if not charger_ids:
+            return []
+        return (
+            db.query(GridLoadForecasted)
+            .join(Actions, GridLoadForecasted.id_action == Actions.id)
+            .join(ChargingSessions, Actions.id_cs == ChargingSessions.id)
+            .filter(ChargingSessions.id_charger.in_(charger_ids))
+            .all()
+        )
     finally:
         db.close()
 
 
 @router.get("/grid_load_forecasted/{grid_load_id}", response_model=GridLoadForecastedRead)
-def get_grid_load_forecasted(grid_load_id: UUID):
+def get_grid_load_forecasted(
+    grid_load_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
         obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Grid load forecasted not found")
+
+        if not is_admin(current_user):
+            require_roles(current_user, "user")
+            if not obj.id_action:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            action = db.query(Actions).filter(Actions.id == obj.id_action).first() #required to verify accessibility
+            if not action or not action.id_cs:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            session = ensure_session_access(
+                db,
+                current_user,
+                action.id_cs,
+                allow_charger_owner=False,
+                allow_pilot_owner=True,
+                allow_guest=False,
+            )
+            if not session:
+                raise HTTPException(status_code=403, detail="Forbidden")
         return obj
     finally:
         db.close()
 
 
 @router.put("/grid_load_forecasted/{grid_load_id}", response_model=GridLoadForecastedRead)
-def update_grid_load_forecasted(grid_load_id: UUID, payload: GridLoadForecastedUpdate):
+def update_grid_load_forecasted(
+    grid_load_id: UUID,
+    payload: GridLoadForecastedUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Grid load forecasted not found")
@@ -653,9 +800,13 @@ def update_grid_load_forecasted(grid_load_id: UUID, payload: GridLoadForecastedU
 
 
 @router.delete("/grid_load_forecasted/{grid_load_id}")
-def delete_grid_load_forecasted(grid_load_id: UUID):
+def delete_grid_load_forecasted(
+    grid_load_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
+        require_admin(current_user)
         obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Grid load forecasted not found")

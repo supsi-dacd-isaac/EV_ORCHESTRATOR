@@ -1,13 +1,17 @@
 from datetime import timedelta
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import SessionLocal
 from app.models import Owners
 from app.services.common.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    TokenData,
     create_access_token,
+    get_current_user,
     hash_password,
     is_password_hashed,
     verify_password,
@@ -28,6 +32,24 @@ class TokenResponse(BaseModel):
     owner_id: str
     user: str
     role: str | None = None
+
+
+class SignupRequest(BaseModel):
+    user: str
+    password: str
+    company_name: str
+
+
+class SignupResponse(BaseModel):
+    id: str
+    user: str
+    company_name: str
+    role: str
+    type: str
+
+
+class LogoutResponse(BaseModel):
+    detail: str
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -67,3 +89,50 @@ def login(payload: LoginRequest):
         )
     finally:
         db.close()
+
+
+@router.post("/signup", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
+def signup(payload: SignupRequest):
+    db = SessionLocal()
+    try:
+        existing = db.query(Owners).filter(Owners.user == payload.user).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="User already exists")
+
+        owner = Owners(
+            id=uuid4(),
+            user=payload.user,
+            password=hash_password(payload.password),
+            company_name=payload.company_name,
+            type="",
+            role="guest",
+        )
+        db.add(owner)
+        db.commit()
+        db.refresh(owner)
+
+        return SignupResponse(
+            id=str(owner.id),
+            user=owner.user,
+            company_name=owner.company_name,
+            role=owner.role or "guest",
+            type=owner.type or "",
+        )
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="User already exists")
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        db.close()
+
+
+@router.post("/logout", response_model=LogoutResponse)
+def logout(current_user: TokenData = Depends(get_current_user)):
+    #TODO - token invalidation strategy should be implemented to prevent token reuse until expiration
+    _ = current_user
+    return LogoutResponse(detail="Logged out successfully")
