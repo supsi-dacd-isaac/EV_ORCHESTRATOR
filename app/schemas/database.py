@@ -237,3 +237,16 @@ class ActionsRead(BaseModel):
     id_cs: Optional[UUID]
     policy: Optional[str]
     model_config = ConfigDict(from_attributes=True)
+
+
+class EvPilotForecastTimeseriesRead(BaseModel):
+    id: UUID
+    id_pilot: UUID
+    run_at: datetime
+    origin_time: datetime
+    forecast_time: datetime
+    presence: float
+    energy_kwh: float
+    artifact_name: str
+    quantiles_json: Optional[dict[str, Any]] = None
+    model_config = ConfigDict(from_attributes=True)

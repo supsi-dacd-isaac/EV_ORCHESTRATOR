@@ -7,10 +7,10 @@ from pydantic import BaseModel
 from sqlalchemy import func
 
 from app.db.session import SessionLocal
-from app.models import Chargers, EvForecastStats
+from app.models import EvForecastStats, EvPilotForecastTimeseries, Pilot
 from app.schemas.database import EvForecastStatsRead
 from app.services.common.auth import TokenData, get_current_user
-from app.services.common.authorization import ensure_charger_access
+from app.services.common.authorization import ensure_charger_access, ensure_pilot_access
 from app.services.common.constants import GENERIC_CHARGER_ID
 
 router = APIRouter(prefix="/forecaster", tags=["forecaster"])
@@ -37,6 +37,18 @@ class ChargerLatestForecast(BaseModel):
     charger_name: str
     note: Optional[str] = None
     hours: list[ForecastHourEntry]
+
+class TotalOccupancyForecast(BaseModel):
+    pilot_id: UUID
+    pilot_name: str
+    timestamp: datetime
+    occupancy: float
+
+class TotalEnergyForecast(BaseModel):
+    pilot_id: UUID
+    pilot_name: str
+    timestamp: datetime
+    energy_kWh: float
 
 
 def _latest_per_hour(db, charger_id) -> dict[int, EvForecastStats]:
@@ -67,7 +79,7 @@ def _resolve_forecast_for_charger(
     db, charger_id
 ) -> tuple[list[ForecastHourEntry], bool]:
     """
-    Apply the same per-hour fallback logic as get_ev_forecast() in ev_forecast/query.py:
+    Apply the same per-hour fallback logic as get_ev_forecast() in ev_forecast/ev_single_forecaster.py:
     for each hour, use the latest charger-specific row; fall back to generic if absent.
     Returns (entries, any_generic_used).
     """
@@ -157,5 +169,77 @@ def get_charger_forecast_history_info(
             .order_by(EvForecastStats.hour, EvForecastStats.updated_at)
             .all()
         )
+    finally:
+        db.close()
+
+def _latest_pilot_timeseries_rows(db, pilot_id: UUID) -> tuple[Pilot | None, list[EvPilotForecastTimeseries]]:
+    pilot = db.query(Pilot).filter(Pilot.id == pilot_id).first()
+    if pilot is None:
+        return None, []
+    latest_run = (
+        db.query(func.max(EvPilotForecastTimeseries.run_at))
+        .filter(EvPilotForecastTimeseries.id_pilot == pilot_id)
+        .scalar()
+    )
+    if latest_run is None:
+        return pilot, []
+    rows = (
+        db.query(EvPilotForecastTimeseries)
+        .filter(
+            EvPilotForecastTimeseries.id_pilot == pilot_id,
+            EvPilotForecastTimeseries.run_at == latest_run,
+        )
+        .order_by(EvPilotForecastTimeseries.forecast_time)
+        .all()
+    )
+    return pilot, rows
+
+
+@router.get("/pilot/{pilot_id}/total_occupancy", response_model=list[TotalOccupancyForecast])
+def forecast_total_occupancy(
+    pilot_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Latest Celery-produced pilot time-series: presence (as occupancy) per forecast timestep."""
+    db = SessionLocal()
+    try:
+        ensure_pilot_access(db, current_user, pilot_id)
+        pilot, rows = _latest_pilot_timeseries_rows(db, pilot_id)
+        if pilot is None:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+        return [
+            TotalOccupancyForecast(
+                pilot_id=pilot.id,
+                pilot_name=pilot.name,
+                timestamp=r.forecast_time,
+                occupancy=r.presence,
+            )
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+@router.get("/pilot/{pilot_id}/total_energy", response_model=list[TotalEnergyForecast])
+def forecast_total_energy(
+    pilot_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Latest Celery-produced pilot time-series: energy per forecast timestep."""
+    db = SessionLocal()
+    try:
+        ensure_pilot_access(db, current_user, pilot_id)
+        pilot, rows = _latest_pilot_timeseries_rows(db, pilot_id)
+        if pilot is None:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+        return [
+            TotalEnergyForecast(
+                pilot_id=pilot.id,
+                pilot_name=pilot.name,
+                timestamp=r.forecast_time,
+                energy_kWh=r.energy_kwh,
+            )
+            for r in rows
+        ]
     finally:
         db.close()
