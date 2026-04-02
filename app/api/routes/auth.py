@@ -52,6 +52,14 @@ class LogoutResponse(BaseModel):
     detail: str
 
 
+class OwnerPublic(BaseModel):
+    id: str
+    user: str
+    company_name: str
+    type: str | None = None
+    role: str | None = None
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest):
     db = SessionLocal()
@@ -136,3 +144,23 @@ def logout(current_user: TokenData = Depends(get_current_user)):
     #TODO - token invalidation strategy should be implemented to prevent token reuse until expiration
     _ = current_user
     return LogoutResponse(detail="Logged out successfully")
+
+
+@router.get("/owners", response_model=list[OwnerPublic])
+def list_owners_public():
+    """Public endpoint: list all owners."""
+    db = SessionLocal()
+    try:
+        owners = db.query(Owners).all()
+        return [
+            OwnerPublic(
+                id=str(o.id),
+                user=o.user,
+                company_name=o.company_name,
+                type=o.type,
+                role=o.role,
+            )
+            for o in owners
+        ]
+    finally:
+        db.close()

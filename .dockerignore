@@ -1,0 +1,13 @@
+# VCS and local environment
+.git
+.gitignore
+.env
+.env.*
+
+# Python cache and local virtual env
+__pycache__/
+*.pyc
+venv/
+
+# Local-only debug helper
+app/run_debug.py

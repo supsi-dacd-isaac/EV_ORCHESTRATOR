@@ -1,4 +1,3 @@
-import os
 import base64
 import hashlib
 import hmac
@@ -11,21 +10,23 @@ import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-
-SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "change-me-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-PBKDF2_ITERATIONS = int(os.getenv("AUTH_PBKDF2_ITERATIONS", "390000"))
+from app.config import (
+    AUTH_ACCESS_TOKEN_EXPIRE_MINUTES,
+    AUTH_ALGORITHM,
+    AUTH_PBKDF2_ITERATIONS,
+    AUTH_SECRET_KEY,
+)
 
 security = HTTPBearer()
+ACCESS_TOKEN_EXPIRE_MINUTES = AUTH_ACCESS_TOKEN_EXPIRE_MINUTES
 
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, AUTH_PBKDF2_ITERATIONS)
     salt_b64 = base64.urlsafe_b64encode(salt).decode("ascii")
     digest_b64 = base64.urlsafe_b64encode(digest).decode("ascii")
-    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt_b64}${digest_b64}"
+    return f"pbkdf2_sha256${AUTH_PBKDF2_ITERATIONS}${salt_b64}${digest_b64}"
 
 
 def is_password_hashed(password_value: str) -> bool:
@@ -68,15 +69,15 @@ def verify_password(plain_password: str, stored_password: str) -> bool:
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expires_delta or timedelta(minutes=AUTH_ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(to_encode, AUTH_SECRET_KEY, algorithm=AUTH_ALGORITHM)
 
 
 def decode_token(token: str) -> dict[str, Any]:
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
     except JWTError as exc:
         raise ValueError("Invalid token") from exc
 

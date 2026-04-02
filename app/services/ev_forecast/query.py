@@ -48,7 +48,7 @@ def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float
             )
 
         if stat is None:
-            return 0.0, 0.0, 0.0, 0.0 #TODO : assign realistic default values
+            return 10.0, 0.0, 2.0, 0.0 #TODO : assign realistic default values
 
         return stat.mean_energy_kwh, stat.std_energy_kwh, stat.mean_duration_hours, stat.std_duration_hours
 

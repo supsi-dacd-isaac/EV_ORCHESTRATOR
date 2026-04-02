@@ -1,11 +1,10 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-DATABASE_URL = "postgresql://postgres:postgre@localhost:5432/ev_orchestrator"
+from app.config import DATABASE_URL, DB_ECHO
 
 engine = create_engine(
     DATABASE_URL,
-    echo=True
+    echo=DB_ECHO
 )
 
 SessionLocal = sessionmaker(

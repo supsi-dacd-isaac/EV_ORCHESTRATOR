@@ -1,8 +1,14 @@
 from fastapi import FastAPI, Depends
 from app.api.routes import auth, events, forecaster, sessions, database
+from app.db.init_db import init_db
 from app.services.common.auth import get_current_user
 
 app = FastAPI(title="ORCHESTRATOR")
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
 
 # Public routes (no authentication required)
 app.include_router(auth.router)
