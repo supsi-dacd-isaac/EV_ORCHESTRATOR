@@ -50,6 +50,6 @@ def _seed_admin():
         )
         db.add(generic_charger)
         db.commit()
-        print(f"Seeded initial admin user '{ADMIN_INIT_USER}' and generic charger.")
+        print(f"Created initial admin user '{ADMIN_INIT_USER}' and generic charger.")
     finally:
         db.close()

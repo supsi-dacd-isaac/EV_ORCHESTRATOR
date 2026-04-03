@@ -362,6 +362,48 @@ ALTER TABLE ONLY public.pilot
 
 
 --
+-- Name: ev_pilot_forecast_timeseries; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.ev_pilot_forecast_timeseries (
+    id uuid NOT NULL,
+    id_pilot uuid NOT NULL,
+    run_at timestamp without time zone NOT NULL,
+    origin_time timestamp without time zone NOT NULL,
+    forecast_time timestamp without time zone NOT NULL,
+    presence double precision NOT NULL,
+    energy_kwh double precision NOT NULL,
+    artifact_name character varying NOT NULL,
+    quantiles_json jsonb
+);
+
+
+ALTER TABLE public.ev_pilot_forecast_timeseries OWNER TO postgres;
+
+--
+-- Name: ev_pilot_forecast_timeseries ev_pilot_forecast_ts_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.ev_pilot_forecast_timeseries
+    ADD CONSTRAINT ev_pilot_forecast_ts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ev_pilot_forecast_timeseries ev_pilot_forecast_ts_pilot_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.ev_pilot_forecast_timeseries
+    ADD CONSTRAINT ev_pilot_forecast_ts_pilot_fkey FOREIGN KEY (id_pilot) REFERENCES public.pilot(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- Name: ev_pilot_forecast_ts_pilot_run_idx; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ev_pilot_forecast_ts_pilot_run_idx ON public.ev_pilot_forecast_timeseries USING btree (id_pilot, run_at DESC);
+
+
+--
 -- PostgreSQL database dump complete
 --
 

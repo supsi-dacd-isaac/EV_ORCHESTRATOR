@@ -2,7 +2,7 @@ from typing import Optional
 import datetime
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, String, UniqueConstraint, Uuid, text
+from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, String, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -42,6 +42,9 @@ class Pilot(Base):
 
     owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
+    ev_pilot_forecast_timeseries: Mapped[list['EvPilotForecastTimeseries']] = relationship(
+        'EvPilotForecastTimeseries', back_populates='pilot'
+    )
 
 
 class Chargers(Base):
@@ -168,3 +171,29 @@ class GridLoadForecasted(Base):
     id_action: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
     actions: Mapped[Optional['Actions']] = relationship('Actions', back_populates='grid_load_forecasted')
+
+
+class EvPilotForecastTimeseries(Base):
+    __tablename__ = 'ev_pilot_forecast_timeseries'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['id_pilot'],
+            ['pilot.id'],
+            ondelete='CASCADE',
+            onupdate='CASCADE',
+            name='ev_pilot_forecast_ts_pilot_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='ev_pilot_forecast_ts_pkey'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    id_pilot: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    run_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    origin_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    forecast_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    presence: Mapped[float] = mapped_column(Double(53), nullable=False)
+    energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
+    artifact_name: Mapped[str] = mapped_column(String, nullable=False)
+    quantiles_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    pilot: Mapped['Pilot'] = relationship('Pilot', back_populates='ev_pilot_forecast_timeseries')

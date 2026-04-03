@@ -1,0 +1,32 @@
+# Local forecast jobs (no MLflow). Co-located under app/services/ev_forecast/.
+# Dev DB seed: scripts/start_local_postgres.sh + python -m app.db.seed_local_dev
+# uses id_pilot below (00000000-0000-0000-0000-000000000001).
+# Pickles default to ev_forecast/artifacts/ (override with FORECASTERS_ARTIFACTS_DIR).
+# If artifact_path is missing or empty, the worker trains (or builds ForecasterSim) from
+# completed charging_sessions for that pilot, then saves the pickle and runs inference.
+#
+# kind:
+#   reg      — ForecasterReg (point forecasts)
+#   reg_prob — ForecasterRegProb (uses predict_pdf; quantiles stored in quantiles_json)
+#   sim      — ForecasterSim (simulation; uses sim_steps, sim_dt_hours, sim_power_kw)
+#
+# Regression resolution: ``freq`` is passed into ForecasterReg on train (and probe). Default
+# horizon is int(24h / freq) — e.g. freq "15min" => 96 steps for the next day. Override with
+# ``horizon: 96`` explicitly if you want. After changing freq/horizon, delete the old pickle
+# or use a new artifact_path so training matches inference.
+#
+# Optional: ``lags: [1, 2, 96]`` — custom lag list; omit to use ForecasterReg default (horizon).
+
+jobs:
+  - id: example_pilot_forecast
+    id_pilot: "00000000-0000-0000-0000-000000000001"
+    enabled: false
+    predict_periodicity_minutes: 60
+    artifact_path: "model.pkl"
+    kind: reg
+    freq: "15min"
+    timezone: "UTC"
+    horizon: 96
+    sim_steps: 24
+    sim_dt_hours: 1.0
+    sim_power_kw: 11.0
