@@ -16,7 +16,7 @@ def _get_bool_env(name: str, default: bool = False) -> bool:
 APP_ENV = os.getenv("APP_ENV", "development")
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/ev_orchestrator",
+    "postgresql://postgres:postgre@localhost:5432/ev_orchestrator",
 )
 DB_ECHO = _get_bool_env("DB_ECHO", default=False)
 
