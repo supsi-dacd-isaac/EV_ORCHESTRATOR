@@ -38,3 +38,20 @@ ACTOR_MODEL_PATH = Path(
         BASE_DIR / "models" / "actor" / DEFAULT_POLICY_FILENAME,
     )
 )
+
+# ---------------------------------------------------------------------------
+# Celery / Redis
+# ---------------------------------------------------------------------------
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+REDBEAT_REDIS_URL = os.getenv("REDBEAT_REDIS_URL", "redis://localhost:6379/0")
+REDBEAT_LOCK_TIMEOUT = int(os.getenv("REDBEAT_LOCK_TIMEOUT", "300"))
+CELERY_VISIBILITY_TIMEOUT = int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "43200"))
+CELERY_PURGE_ON_START = _get_bool_env("CELERY_PURGE_ON_START", default=False)
+
+# ---------------------------------------------------------------------------
+# Forecast
+# ---------------------------------------------------------------------------
+FORECASTERS_ARTIFACTS_DIR = os.getenv("FORECASTERS_ARTIFACTS_DIR", "")
+FORECAST_JOBS_MANIFEST = os.getenv("FORECAST_JOBS_MANIFEST", "")
+FORECAST_PRUNE_ORPHAN_REDBEAT = _get_bool_env("FORECAST_PRUNE_ORPHAN_REDBEAT", default=False)

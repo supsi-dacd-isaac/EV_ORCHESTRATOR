@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -33,16 +32,18 @@ class ForecastJob:
 
 def forecast_artifacts_dir() -> Path:
     """Directory for pickles (model.pkl, etc.). Default: ``ev_forecast/artifacts``."""
-    env = os.getenv("FORECASTERS_ARTIFACTS_DIR")
-    if env:
-        return Path(env).resolve()
+    from app.config import FORECASTERS_ARTIFACTS_DIR
+
+    if FORECASTERS_ARTIFACTS_DIR:
+        return Path(FORECASTERS_ARTIFACTS_DIR).resolve()
     return Path(__file__).resolve().parent / "artifacts"
 
 
 def manifest_path() -> Path:
-    override = os.getenv("FORECAST_JOBS_MANIFEST")
-    if override:
-        return Path(override).resolve()
+    from app.config import FORECAST_JOBS_MANIFEST
+
+    if FORECAST_JOBS_MANIFEST:
+        return Path(FORECAST_JOBS_MANIFEST).resolve()
     return Path(__file__).resolve().parent / "ev_total_forecast_jobs.yaml"
 
 

@@ -38,10 +38,6 @@ services:
     depends_on:
       - db
 
-volumes:
-  pg_data:
-
-
   celery_worker:
     build:
       context: ..
@@ -49,15 +45,19 @@ volumes:
     command: >
       celery -A app.celery_apps.worker.celery_app worker -l INFO -Q celery
     working_dir: /app
-    volumes:
-      - ../app/services/ev_forecast/artifacts:/app/app/services/ev_forecast/artifacts
+    env_file:
+      - ../.env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgre@host.docker.internal:5432/ev_orchestrator}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ev_orchestrator}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       REDBEAT_REDIS_URL: redis://redis:6379/0
       FORECASTERS_ARTIFACTS_DIR: /app/app/services/ev_forecast/artifacts
+    volumes:
+      - ../app/services/ev_forecast/artifacts:/app/app/services/ev_forecast/artifacts
     depends_on:
+      db:
+        condition: service_started
       redis:
         condition: service_healthy
 
@@ -68,14 +68,21 @@ volumes:
     command: >
       celery -A app.celery_apps.scheduler.scheduler_app worker --beat -l INFO -Q scheduler
     working_dir: /app
-    volumes:
-      - ../app/services/ev_forecast/artifacts:/app/app/services/ev_forecast/artifacts
+    env_file:
+      - ../.env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgre@host.docker.internal:5432/ev_orchestrator}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ev_orchestrator}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       REDBEAT_REDIS_URL: redis://redis:6379/0
       FORECASTERS_ARTIFACTS_DIR: /app/app/services/ev_forecast/artifacts
+    volumes:
+      - ../app/services/ev_forecast/artifacts:/app/app/services/ev_forecast/artifacts
     depends_on:
+      db:
+        condition: service_started
       redis:
         condition: service_healthy
+
+volumes:
+  pg_data:

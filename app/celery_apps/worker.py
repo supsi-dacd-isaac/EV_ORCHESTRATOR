@@ -1,17 +1,17 @@
-import os
-
 from celery import Celery
+
+from app.config import CELERY_BROKER_URL, CELERY_RESULT_BACKEND, CELERY_VISIBILITY_TIMEOUT
 
 celery_app = Celery(
     "ev_orchestrator_worker",
-    broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
-    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0"),
+    broker=CELERY_BROKER_URL,
+    backend=CELERY_RESULT_BACKEND,
     include=["app.celery_apps.tasks.forecast_tasks"],
 )
 
 celery_app.conf.update(
     worker_log_level="INFO",
     broker_transport_options={
-        "visibility_timeout": int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "43200")),
+        "visibility_timeout": CELERY_VISIBILITY_TIMEOUT,
     },
 )

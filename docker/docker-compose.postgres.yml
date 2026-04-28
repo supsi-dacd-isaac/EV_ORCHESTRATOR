@@ -2,16 +2,16 @@
 # Usage (from repo root):
 #   docker compose -f docker/docker-compose.postgres.yml up -d
 # Then:
-#   export DATABASE_URL=postgresql://postgres:postgre@localhost:5432/ev_orchestrator
+#   export DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@localhost:5432/ev_orchestrator
 #   python -m app.db.seed_local_dev
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgre
-      POSTGRES_DB: ev_orchestrator
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ev_orchestrator}
     ports:
       - "5432:5432"
     healthcheck:

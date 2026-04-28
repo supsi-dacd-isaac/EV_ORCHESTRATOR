@@ -30,3 +30,16 @@ jobs:
     sim_steps: 24
     sim_dt_hours: 1.0
     sim_power_kw: 11.0
+
+  - id: aggregated_pilot_forecast_test
+    id_pilot: "f8707fb6-90b3-4b40-a9d5-e41dcf4bebae"
+    enabled: true
+    predict_periodicity_minutes: 60
+    artifact_path: "model.pkl"
+    kind: sim
+    freq: "1min"
+    timezone: "UTC"
+    horizon: 96
+    sim_steps: 24
+    sim_dt_hours: 1.0
+    sim_power_kw: 11.0

@@ -1,4 +1,3 @@
-import os
 from datetime import timedelta
 
 from celery.schedules import crontab, schedule as interval_schedule
@@ -7,6 +6,7 @@ from redbeat import RedBeatSchedulerEntry
 
 from app.celery_apps.scheduler import scheduler_app
 from app.celery_apps.task_names import GENERATE_PILOT_FORECAST
+from app.config import FORECAST_PRUNE_ORPHAN_REDBEAT, REDBEAT_REDIS_URL
 from app.services.ev_forecast.forecast_manifest import load_forecast_jobs
 
 logger = get_task_logger(__name__)
@@ -44,14 +44,14 @@ def check_and_schedule_tasks() -> None:
         entry.save()
         logger.debug("Synced RedBeat entry %s every %s min", entry_name, job.predict_periodicity_minutes)
 
-    if os.getenv("FORECAST_PRUNE_ORPHAN_REDBEAT", "").lower() in ("1", "true", "yes"):
+    if FORECAST_PRUNE_ORPHAN_REDBEAT:
         _prune_orphan_redbeat(active_ids)
 
 
 def _prune_orphan_redbeat(active_ids: set[str]) -> None:
     import redis
 
-    url = os.getenv("REDBEAT_REDIS_URL", "redis://localhost:6379/0")
+    url = REDBEAT_REDIS_URL
     client = redis.StrictRedis.from_url(url)
     prefix = b"redbeat:ev_forecast_job_"
     for key in client.scan_iter(match="redbeat:ev_forecast_job_*"):
