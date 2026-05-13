@@ -121,7 +121,7 @@ def seed(db, *, force: bool) -> None:
         password="not-used",
         company_name="Local Dev",
     )
-    pilot = Pilot(id=SEED_PILOT_ID, name="local_dev_pilot", id_owner=SEED_OWNER_ID)
+    pilot = Pilot(id=SEED_PILOT_ID, name="local_dev_pilot", id_owner=SEED_OWNER_ID, timezone_name="Europe/Zurich")
     db.add(owner)
     db.add(pilot)
 

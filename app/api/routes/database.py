@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from datetime import datetime
 
 from app.db.session import SessionLocal
-from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats, Pilot, GridLoadForecasted
+from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats, Pilot, GridLoadForecasted, ForecastJobDB
 from app.schemas.database import (
     OwnersCreate, OwnersUpdate, OwnersRead,
     ChargersCreate, ChargersUpdate, ChargersRead,
@@ -13,6 +13,7 @@ from app.schemas.database import (
     EvForecastStatsCreate, EvForecastStatsUpdate, EvForecastStatsRead,
     PilotCreate, PilotUpdate, PilotRead,
     GridLoadForecastedCreate, GridLoadForecastedUpdate, GridLoadForecastedRead,
+    ForecastJobCreate, ForecastJobUpdate, ForecastJobRead,
 )
 from app.services.common.auth import TokenData, get_current_user, hash_password
 from app.services.common.authorization import (
@@ -340,8 +341,30 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
             id=uuid4(),
             name=payload.name,
             id_owner=payload.id_owner,
+            timezone_name=payload.timezone_name,
         )
         db.add(obj)
+        db.flush()  # get obj.id before creating the job
+
+        # Auto-create a disabled forecast job for this pilot
+        default_job = ForecastJobDB(
+            id=uuid4(),
+            job_id=f"pilot_{obj.id}_forecast",
+            id_pilot=obj.id,
+            enabled=False,
+            predict_periodicity_minutes=1,
+            artifact_path=f"{obj.id}_model.pkl",
+            kind="sim",
+            freq="15min", #used by reg
+            timezone="UTC",
+            horizon=None, #used by reg
+            sim_steps=16, #used by sim 
+            sim_dt_hours=0.25, #used by sim
+            sim_power_kw=11.0,
+            cal_fraction=0.2,
+            lags=None,
+        )
+        db.add(default_job)
         db.commit()
         db.refresh(obj)
         return obj
@@ -437,7 +460,6 @@ def create_action(payload: ActionsCreate, current_user: TokenData = Depends(get_
             is_fully_charged=payload.is_fully_charged,
             probability_disconnection=payload.probability_disconnection,
             cumulative_duration_probability=payload.cumulative_duration_probability,
-            community_load=payload.community_load,
             action=payload.action,
             id_cs=payload.id_cs,
         )
@@ -523,7 +545,7 @@ def create_duration(payload: EvDurationCdfCreate, current_user: TokenData = Depe
         require_admin(current_user)
         obj = EvDurationCdf(
             id=uuid4(),
-            hour=payload.hour,
+            local_hour=payload.local_hour,
             horizon_hours=payload.horizon_hours,
             probability=payload.probability,
             sample_count=payload.sample_count,
@@ -611,7 +633,7 @@ def create_ev_forecast(
         require_admin(current_user)
         obj = EvForecastStats(
             id=uuid4(),
-            hour=payload.hour,
+            local_hour=payload.local_hour,
             mean_energy_kwh=payload.mean_energy_kwh,
             std_energy_kwh=payload.std_energy_kwh,
             mean_duration_hours=payload.mean_duration_hours,
@@ -810,6 +832,109 @@ def delete_grid_load_forecasted(
         obj = db.query(GridLoadForecasted).filter(GridLoadForecasted.id == grid_load_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Grid load forecasted not found")
+        db.delete(obj)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ---------- Forecast Jobs ----------
+@router.post("/forecast_jobs", response_model=ForecastJobRead)
+def create_forecast_job(payload: ForecastJobCreate, current_user: TokenData = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        require_admin(current_user)
+        existing = db.query(ForecastJobDB).filter(ForecastJobDB.job_id == payload.job_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="job_id already exists")
+        pilot = db.query(Pilot).filter(Pilot.id == payload.id_pilot).first()
+        if not pilot:
+            raise HTTPException(status_code=404, detail="Pilot not found")
+        obj = ForecastJobDB(
+            id=uuid4(),
+            job_id=payload.job_id,
+            id_pilot=payload.id_pilot,
+            enabled=payload.enabled,
+            predict_periodicity_minutes=payload.predict_periodicity_minutes,
+            artifact_path=payload.artifact_path,
+            kind=payload.kind,
+            freq=payload.freq,
+            timezone=payload.timezone,
+            horizon=payload.horizon,
+            sim_steps=payload.sim_steps,
+            sim_dt_hours=payload.sim_dt_hours,
+            sim_power_kw=payload.sim_power_kw,
+            cal_fraction=payload.cal_fraction,
+            lags=payload.lags,
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.get("/forecast_jobs", response_model=list[ForecastJobRead])
+def list_forecast_jobs(current_user: TokenData = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        #require_admin(current_user)
+        return db.query(ForecastJobDB).all()
+    finally:
+        db.close()
+
+
+@router.get("/forecast_jobs/{job_id}", response_model=ForecastJobRead)
+def get_forecast_job(job_id: str, current_user: TokenData = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        #require_admin(current_user)
+        obj = db.query(ForecastJobDB).filter(ForecastJobDB.job_id == job_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Forecast job not found")
+        return obj
+    finally:
+        db.close()
+
+
+@router.put("/forecast_jobs/{job_id}", response_model=ForecastJobRead)
+def c(
+    job_id: str,
+    payload: ForecastJobUpdate,
+    current_user: TokenData = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        require_admin(current_user)
+        obj = db.query(ForecastJobDB).filter(ForecastJobDB.job_id == job_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Forecast job not found")
+        data = payload.dict(exclude_unset=True)
+        data.pop('updated_at', None)
+        # If renaming job_id, check uniqueness
+        if 'job_id' in data and data['job_id'] != obj.job_id:
+            conflict = db.query(ForecastJobDB).filter(ForecastJobDB.job_id == data['job_id']).first()
+            if conflict:
+                raise HTTPException(status_code=400, detail="job_id already exists")
+        for k, v in data.items():
+            setattr(obj, k, v)
+        db.commit()
+        db.refresh(obj)
+        return obj
+    finally:
+        db.close()
+
+
+@router.delete("/forecast_jobs/{job_id}")
+def delete_forecast_job(job_id: str, current_user: TokenData = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        require_admin(current_user)
+        obj = db.query(ForecastJobDB).filter(ForecastJobDB.job_id == job_id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Forecast job not found")
         db.delete(obj)
         db.commit()
         return {"ok": True}

@@ -22,6 +22,7 @@ def prepare_observation(
     time_connection_hour = time_connection.hour
     time_current_hour = time_current.hour
     time_current_month = time_current.month
+    # Both time_connection and time_current are UTC-aware (normalised by orchestrator_service)
     connected_time_hours = (time_current - time_connection).total_seconds()/3600
     max_possible_energy = forecasted_duration_hours * current_power_kw
     community_load_kw_mean = np.mean(community_load_kw)

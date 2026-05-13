@@ -46,7 +46,7 @@ SET default_table_access_method = heap;
 CREATE TABLE public.actions (
     id uuid NOT NULL,
     id_cs uuid,
-    "current_time" timestamp without time zone NOT NULL,
+    "current_time" timestamp with time zone NOT NULL,
     current_power_kw double precision NOT NULL,
     energy_delivered_kwh double precision NOT NULL,
     is_fully_charged boolean NOT NULL,
@@ -72,7 +72,7 @@ CREATE TABLE public.chargers (
     longitude double precision NOT NULL,
     nominal_power double precision NOT NULL,
     plugs character varying NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     id_pilot uuid
 );
 
@@ -86,9 +86,9 @@ ALTER TABLE public.chargers OWNER TO postgres;
 CREATE TABLE public.charging_sessions (
     id uuid NOT NULL,
     id_charger uuid,
-    start_time timestamp without time zone NOT NULL,
-    end_time timestamp without time zone,
-    end_charging_time timestamp without time zone,
+    start_time timestamp with time zone NOT NULL,
+    end_time timestamp with time zone,
+    end_charging_time timestamp with time zone,
     duration double precision,
     energy_delivered_kwh double precision NOT NULL,
     forecasted_energy_kwh double precision NOT NULL,
@@ -97,7 +97,8 @@ CREATE TABLE public.charging_sessions (
     forecasted_duration_hours_std double precision NOT NULL,
     controlled_charging_points integer DEFAULT 1 NOT NULL,
     active boolean DEFAULT true NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    client_utc_offset_minutes integer
 );
 
 
@@ -110,11 +111,11 @@ ALTER TABLE public.charging_sessions OWNER TO postgres;
 CREATE TABLE public.ev_duration_cdf (
     id uuid CONSTRAINT ev_duration_cdf_id_not_null1 NOT NULL,
     id_charger uuid,
-    hour integer CONSTRAINT ev_duration_cdf_hour_not_null1 NOT NULL,
+    local_hour integer CONSTRAINT ev_duration_cdf_local_hour_not_null1 NOT NULL,
     horizon_hours double precision CONSTRAINT ev_duration_cdf_horizon_hours_not_null1 NOT NULL,
     probability double precision CONSTRAINT ev_duration_cdf_probability_not_null1 NOT NULL,
     sample_count integer CONSTRAINT ev_duration_cdf_sample_count_not_null1 NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() CONSTRAINT ev_duration_cdf_updated_at_not_null1 NOT NULL
+    updated_at timestamp with time zone DEFAULT now() CONSTRAINT ev_duration_cdf_updated_at_not_null1 NOT NULL
 );
 
 
@@ -127,13 +128,13 @@ ALTER TABLE public.ev_duration_cdf OWNER TO postgres;
 CREATE TABLE public.ev_forecast_stats (
     id uuid NOT NULL,
     id_charger uuid,
-    hour integer CONSTRAINT ev_forecast_stats_hour_not_null1 NOT NULL,
+    local_hour integer CONSTRAINT ev_forecast_stats_local_hour_not_null1 NOT NULL,
     mean_energy_kwh double precision CONSTRAINT ev_forecast_stats_mean_energy_kwh_not_null1 NOT NULL,
     std_energy_kwh double precision CONSTRAINT ev_forecast_stats_std_energy_kwh_not_null1 NOT NULL,
     mean_duration_hours double precision CONSTRAINT ev_forecast_stats_mean_duration_hours_not_null1 NOT NULL,
     std_duration_hours double precision CONSTRAINT ev_forecast_stats_std_duration_hours_not_null1 NOT NULL,
     sample_count integer CONSTRAINT ev_forecast_stats_sample_count_not_null1 NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() CONSTRAINT ev_forecast_stats_updated_at_not_null1 NOT NULL
+    updated_at timestamp with time zone DEFAULT now() CONSTRAINT ev_forecast_stats_updated_at_not_null1 NOT NULL
 );
 
 
@@ -161,9 +162,10 @@ CREATE TABLE public.owners (
     "user" character varying NOT NULL,
     password character varying NOT NULL,
     company_name character varying NOT NULL,
-    updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     type character varying,
-    role character varying
+    role character varying,
+    token text
 );
 
 
@@ -176,7 +178,8 @@ ALTER TABLE public.owners OWNER TO postgres;
 CREATE TABLE public.pilot (
     id uuid NOT NULL,
     name character varying NOT NULL,
-    id_owner uuid NOT NULL
+    id_owner uuid NOT NULL,
+    timezone_name character varying NOT NULL DEFAULT 'Europe/Zurich'
 );
 
 
@@ -368,9 +371,9 @@ ALTER TABLE ONLY public.pilot
 CREATE TABLE public.ev_pilot_forecast_timeseries (
     id uuid NOT NULL,
     id_pilot uuid NOT NULL,
-    run_at timestamp without time zone NOT NULL,
-    origin_time timestamp without time zone NOT NULL,
-    forecast_time timestamp without time zone NOT NULL,
+    run_at timestamp with time zone NOT NULL,
+    origin_time timestamp with time zone NOT NULL,
+    forecast_time timestamp with time zone NOT NULL,
     presence double precision NOT NULL,
     energy_kwh double precision NOT NULL,
     artifact_name character varying NOT NULL,

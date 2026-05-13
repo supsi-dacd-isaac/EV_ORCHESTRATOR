@@ -87,6 +87,10 @@ def login(payload: LoginRequest):
             expires_delta=expires_delta,
         )
 
+        # Persist the active token (re-login while already logged in just replaces it)
+        owner.token = access_token
+        db.commit()
+
         return TokenResponse(
             access_token=access_token,
             token_type="bearer",
@@ -141,8 +145,14 @@ def signup(payload: SignupRequest):
 
 @router.post("/logout", response_model=LogoutResponse)
 def logout(current_user: TokenData = Depends(get_current_user)):
-    #TODO - token invalidation strategy should be implemented to prevent token reuse until expiration
-    _ = current_user
+    db = SessionLocal()
+    try:
+        owner = db.query(Owners).filter(Owners.user == current_user.user).first()
+        if owner:
+            owner.token = None
+            db.commit()
+    finally:
+        db.close()
     return LogoutResponse(detail="Logged out successfully")
 
 

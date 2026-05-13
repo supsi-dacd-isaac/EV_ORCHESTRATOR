@@ -20,9 +20,10 @@ class Owners(Base):
     user: Mapped[str] = mapped_column(String, nullable=False)
     password: Mapped[str] = mapped_column(String, nullable=False)
     company_name: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     type: Mapped[Optional[str]] = mapped_column(String)
     role: Mapped[Optional[str]] = mapped_column(String)
+    token: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
 
     pilot: Mapped[list['Pilot']] = relationship('Pilot', back_populates='owners')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='owners')
@@ -39,12 +40,14 @@ class Pilot(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     id_owner: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    timezone_name: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'Europe/Zurich'"))
 
     owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
     ev_pilot_forecast_timeseries: Mapped[list['EvPilotForecastTimeseries']] = relationship(
-        'EvPilotForecastTimeseries', back_populates='pilot'
+        'EvPilotForecastTimeseries', back_populates='pilot', foreign_keys='EvPilotForecastTimeseries.id_pilot'
     )
+    forecast_jobs: Mapped[list['ForecastJobDB']] = relationship('ForecastJobDB', back_populates='pilot')
 
 
 class Chargers(Base):
@@ -62,7 +65,7 @@ class Chargers(Base):
     longitude: Mapped[float] = mapped_column(Double(53), nullable=False)
     nominal_power: Mapped[float] = mapped_column(Double(53), nullable=False)
     plugs: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     id_owner: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
     id_pilot: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
@@ -81,7 +84,7 @@ class ChargingSessions(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    start_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    start_time: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     energy_delivered_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     forecasted_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     forecasted_energy_kwh_std: Mapped[float] = mapped_column(Double(53), nullable=False)
@@ -89,10 +92,10 @@ class ChargingSessions(Base):
     forecasted_duration_hours_std: Mapped[float] = mapped_column(Double(53), nullable=False)
     controlled_charging_points: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('1'))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
-    end_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime)
-    end_charging_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime)
+    end_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True))
+    end_charging_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True))
     duration: Mapped[Optional[float]] = mapped_column(Double(53))
 
     chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='charging_sessions')
@@ -107,11 +110,11 @@ class EvDurationCdf(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    local_hour: Mapped[int] = mapped_column(Integer, nullable=False)
     horizon_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
     probability: Mapped[float] = mapped_column(Double(53), nullable=False)
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
     chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='ev_duration_cdf')
@@ -125,13 +128,13 @@ class EvForecastStats(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    local_hour: Mapped[int] = mapped_column(Integer, nullable=False)
     mean_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     std_energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     mean_duration_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
     std_duration_hours: Mapped[float] = mapped_column(Double(53), nullable=False)
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     id_charger: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
     chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='ev_forecast_stats')
@@ -145,7 +148,7 @@ class Actions(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    current_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    current_time: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     current_power_kw: Mapped[float] = mapped_column(Double(53), nullable=False)
     energy_delivered_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     is_fully_charged: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -179,7 +182,7 @@ class EvPilotForecastTimeseries(Base):
         ForeignKeyConstraint(
             ['id_pilot'],
             ['pilot.id'],
-            ondelete='CASCADE',
+            ondelete='SET NULL',
             onupdate='CASCADE',
             name='ev_pilot_forecast_ts_pilot_fkey',
         ),
@@ -187,13 +190,47 @@ class EvPilotForecastTimeseries(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    id_pilot: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    run_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
-    origin_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
-    forecast_time: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    id_pilot: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, nullable=True)
+    run_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    origin_time: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    forecast_time: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     presence: Mapped[float] = mapped_column(Double(53), nullable=False)
     energy_kwh: Mapped[float] = mapped_column(Double(53), nullable=False)
     artifact_name: Mapped[str] = mapped_column(String, nullable=False)
     quantiles_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
-    pilot: Mapped['Pilot'] = relationship('Pilot', back_populates='ev_pilot_forecast_timeseries')
+    pilot: Mapped[Optional['Pilot']] = relationship('Pilot', back_populates='ev_pilot_forecast_timeseries')
+
+
+class ForecastJobDB(Base):
+    __tablename__ = 'forecast_jobs'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['id_pilot'],
+            ['pilot.id'],
+            ondelete='CASCADE',
+            onupdate='CASCADE',
+            name='forecast_jobs_pilot_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='forecast_jobs_pkey'),
+        UniqueConstraint('job_id', name='forecast_jobs_job_id_key'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    job_id: Mapped[str] = mapped_column(String, nullable=False)
+    id_pilot: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    predict_periodicity_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('60'))
+    artifact_path: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'reg'"))
+    freq: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'1h'"))
+    timezone: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'UTC'"))
+    horizon: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sim_steps: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('24'))
+    sim_dt_hours: Mapped[float] = mapped_column(Double(53), nullable=False, server_default=text('1.0'))
+    sim_power_kw: Mapped[float] = mapped_column(Double(53), nullable=False, server_default=text('11.0'))
+    cal_fraction: Mapped[float] = mapped_column(Double(53), nullable=False, server_default=text('0.2'))
+    lags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+
+    pilot: Mapped['Pilot'] = relationship('Pilot', back_populates='forecast_jobs')

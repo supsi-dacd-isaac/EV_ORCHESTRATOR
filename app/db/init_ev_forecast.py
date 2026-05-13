@@ -14,7 +14,7 @@ def init_ev_forecast(charger_id: str):
             stat = EvForecastStats(
                 id=uuid.uuid4(),
                 id_charger=charger_id,
-                hour=hour,
+                local_hour=hour,
                 mean_energy_kwh=mean_energy,
                 std_energy_kwh=std_energy,
                 mean_duration_hours=mean_duration,

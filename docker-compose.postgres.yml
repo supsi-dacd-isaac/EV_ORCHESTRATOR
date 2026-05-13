@@ -1,6 +1,6 @@
 # Local Postgres for EV_ORCHESTRATOR dev / forecast testing.
 # Usage (from repo root):
-#   docker compose -f docker/docker-compose.postgres.yml up -d
+#   docker compose -f docker-compose.postgres.yml up -d
 # Then:
 #   export DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@localhost:5432/ev_orchestrator
 #   python -m app.db.seed_local_dev

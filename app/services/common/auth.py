@@ -9,7 +9,7 @@ from uuid import UUID
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 from app.config import (
     AUTH_ACCESS_TOKEN_EXPIRE_MINUTES,
     AUTH_ALGORITHM,
@@ -76,10 +76,7 @@ def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = 
 
 
 def decode_token(token: str) -> dict[str, Any]:
-    try:
-        return jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
-    except JWTError as exc:
-        raise ValueError("Invalid token") from exc
+    return jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
 
 
 class TokenData:
@@ -93,33 +90,52 @@ class TokenData:
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> TokenData:
     """
     Dependency that validates JWT token and returns authenticated user data.
-    
-    Usage:
-        @router.get("/protected")
-        def protected_route(current_user: TokenData = Depends(get_current_user)):
-            return {"owner_id": current_user.owner_id}
+    Also checks the token matches the one stored on the owner row (logout invalidation).
     """
     token = credentials.credentials
-    
+
     try:
         payload = decode_token(token)
         user = payload.get("sub")
         owner_id_str = payload.get("owner_id")
         role = payload.get("role")
-        
+
         if user is None or owner_id_str is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication credentials",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+
+        # Validate token against DB — rejects tokens invalidated by logout
+        from app.db.session import SessionLocal
+        from app.models import Owners
+        db = SessionLocal()
+        try:
+            owner = db.query(Owners).filter(Owners.user == user).first()
+            if owner is None or owner.token is None or owner.token != token:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been invalidated. Please log in again.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        finally:
+            db.close()
+
         return TokenData(
             owner_id=UUID(owner_id_str),
             user=user,
             role=role,
         )
-    except ValueError:
+    except HTTPException:
+        raise
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except (JWTError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",

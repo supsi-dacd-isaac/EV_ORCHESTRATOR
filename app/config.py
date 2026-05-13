@@ -55,3 +55,13 @@ CELERY_PURGE_ON_START = _get_bool_env("CELERY_PURGE_ON_START", default=False)
 FORECASTERS_ARTIFACTS_DIR = os.getenv("FORECASTERS_ARTIFACTS_DIR", "")
 FORECAST_JOBS_MANIFEST = os.getenv("FORECAST_JOBS_MANIFEST", "")
 FORECAST_PRUNE_ORPHAN_REDBEAT = _get_bool_env("FORECAST_PRUNE_ORPHAN_REDBEAT", default=False)
+_max_age_raw = os.getenv("FORECAST_ARTIFACT_MAX_AGE_DAYS", "")
+FORECAST_ARTIFACT_MAX_AGE_DAYS: int = int(_max_age_raw) if _max_age_raw.strip() else 0
+
+# ---------------------------------------------------------------------------
+# CSV session import
+# ---------------------------------------------------------------------------
+# Maximum upload size in bytes (~300 rows at ~170 bytes/row)
+CSV_IMPORT_MAX_BYTES = int(os.getenv("CSV_IMPORT_MAX_BYTES", str(52_428)))
+# Maximum number of rows processed per import call
+CSV_IMPORT_MAX_ROWS = int(os.getenv("CSV_IMPORT_MAX_ROWS", "200"))

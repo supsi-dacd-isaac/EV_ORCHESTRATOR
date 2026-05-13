@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pandas as pd
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models import Chargers, ChargingSessions, EvPilotForecastTimeseries
 from app.services.ev_forecast.forecast_manifest import ForecastJob, forecast_artifacts_dir
+from app.config import FORECAST_ARTIFACT_MAX_AGE_DAYS
 
 if TYPE_CHECKING:
     from app.services.ev_forecast.ev_total_forecaster import ForecasterReg, ForecasterRegProb
@@ -34,16 +35,18 @@ def _floor_to_sim_step(ts: pd.Timestamp, sim_dt_hours: float) -> pd.Timestamp:
     return ts.floor(f"{minutes}min")
 
 
-def _to_utc_naive(value: pd.Timestamp | datetime) -> datetime:
+def _to_utc(value: pd.Timestamp | datetime) -> datetime:
     """
-    Columns use ``timestamp without time zone``; store UTC wall time as naive datetime.
-    Passing tz-aware values otherwise lets the driver shift to the OS timezone (e.g. +2h in CEST).
+    Normalise a pd.Timestamp or datetime to a UTC-aware Python datetime.
+    Columns use TIMESTAMP WITH TIME ZONE; psycopg2 with timezone=True round-trips
+    tz-aware datetimes correctly.
     """
     ts = pd.Timestamp(value)
-    if ts.tzinfo is not None:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
         ts = ts.tz_convert("UTC")
-    dt = ts.to_pydatetime()
-    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+    return ts.to_pydatetime()
 
 
 def _reg_format_min_bars(model: ForecasterReg | ForecasterRegProb) -> int:
@@ -78,31 +81,52 @@ def _pilot_max_session_end(db: Session, pilot_id: UUID) -> datetime | None:
     )
 
 
+def _observed_counts_at(
+    db: Session,
+    pilot_id: UUID,
+    at: pd.Timestamp,
+) -> dict[str, int] | None:
+    """Per-station count of sessions that started but had not yet ended at *at* (UTC-aware).
+
+    Returns None when no active sessions exist (so ForecasterSim.predict keeps its
+    empty-state default rather than receiving an all-zero dict).
+    """
+    at_utc = _to_utc(at)
+    rows = (
+        db.query(Chargers.id, func.count(ChargingSessions.id))
+        .join(ChargingSessions, ChargingSessions.id_charger == Chargers.id)
+        .filter(
+            Chargers.id_pilot == pilot_id,
+            ChargingSessions.start_time <= at_utc,
+            or_(
+                ChargingSessions.end_time.is_(None),
+                ChargingSessions.end_time > at_utc,
+            ),
+        )
+        .group_by(Chargers.id)
+        .all()
+    )
+    if not rows:
+        return None
+    return {str(charger_id): int(count) for charger_id, count in rows}
+
+
 def _sessions_end_after_cutoff_for_prediction(
     model: ForecasterReg | ForecasterRegProb,
     db: Session,
     pilot_id: UUID,
 ) -> datetime:
     """
-    Naive UTC: keep sessions with ``end_time > cutoff`` for prediction.
+    UTC-aware: keep sessions with ``end_time > cutoff`` for prediction.
 
-    Anchor the window on **latest session end in the DB**, not wall-clock ``now``, so stale /
-    historical-only datasets (e.g. dev seed ending in 2024) still get a tight window instead of
-    always falling back to full history.
+    Anchors on current wall-clock time so the lookback window always ends at
+    "now", regardless of when the last session ended.
     """
     n_bars = _reg_format_min_bars(model)
     delta = n_bars * pd.Timedelta(model.freq)
-    ref_end = _pilot_max_session_end(db, pilot_id)
-    if ref_end is None:
-        anchor = pd.Timestamp.now(tz="UTC")
-    else:
-        anchor = pd.Timestamp(ref_end)
-        if anchor.tzinfo is None:
-            anchor = anchor.tz_localize("UTC")
-        else:
-            anchor = anchor.tz_convert("UTC")
+    anchor = pd.Timestamp.now(tz="UTC")
     start = anchor - delta
-    return start.to_pydatetime().replace(tzinfo=None)
+    return start.to_pydatetime()
 
 
 def _register_legacy_forecaster_pickle_modules() -> None:
@@ -183,10 +207,21 @@ def _ensure_model(
     extra: dict = {"artifact_trained": False}
 
     if path.is_file() and path.stat().st_size > 0:
-        try:
-            return _load_pickle(path), extra
-        except (OSError, pickle.UnpicklingError, EOFError, AttributeError) as e:
-            logger.warning("Failed to load %s (%s); will retrain if data allows", path, e)
+        stale = (
+            FORECAST_ARTIFACT_MAX_AGE_DAYS > 0
+            and (datetime.now(timezone.utc).timestamp() - path.stat().st_mtime) / 86400
+            > FORECAST_ARTIFACT_MAX_AGE_DAYS
+        )
+        if stale:
+            logger.info(
+                "Artifact %s is older than %d day(s); will retrain.",
+                path, FORECAST_ARTIFACT_MAX_AGE_DAYS,
+            )
+        else:
+            try:
+                return _load_pickle(path), extra
+            except (OSError, pickle.UnpicklingError, EOFError, AttributeError) as e:
+                logger.warning("Failed to load %s (%s); will retrain if data allows", path, e)
 
     df = charging_sessions_to_forecast_df(db, job.id_pilot)
     if df.empty:
@@ -283,13 +318,13 @@ def _persist_reg_like(
     """
     artifact = job.artifact_path
     count = 0
-    anchor_dt = _to_utc_naive(forecast_anchor)
+    anchor_dt = _to_utc(forecast_anchor)
     to_add: list[EvPilotForecastTimeseries] = []
     for _, row in pred.iterrows():
         ft = row["time"]
         if not isinstance(ft, pd.Timestamp):
             ft = pd.Timestamp(ft)
-        ft_dt = _to_utc_naive(ft)
+        ft_dt = _to_utc(ft)
         qjson = None
         if use_pdf:
             qjson = _quantile_dict_from_row(row)
@@ -329,8 +364,8 @@ def _persist_sim(
                 id=uuid4(),
                 id_pilot=job.id_pilot,
                 run_at=run_at,
-                origin_time=_to_utc_naive(start_time),
-                forecast_time=_to_utc_naive(ft),
+                origin_time=_to_utc(start_time),
+                forecast_time=_to_utc(ft),
                 presence=float(row["connected_evs"]),
                 energy_kwh=float(row["energy_delivered_kwh"]),
                 artifact_name=artifact,
@@ -342,6 +377,38 @@ def _persist_sim(
     return len(to_add)
 
 
+def _apply_reg_post_processing(
+    pred: pd.DataFrame,
+    now: pd.Timestamp,
+    freq_td: pd.Timedelta,
+    current_occupancy: int,
+) -> pd.DataFrame:
+    """Post-process a reg/reg_prob prediction DataFrame:
+
+    1. Re-anchor ``time`` so the horizon starts from *now* (not from the last
+       historical bin, which could be hours in the past).
+    2. Round ``presence`` to the nearest integer and clip to ≥ 0.
+    3. Force the first forecast step's ``presence`` to be ≥ *current_occupancy*
+       (vehicles already connected cannot disappear in the very next step).
+    4. Clip ``energy_consumed`` to ≥ 0.
+    """
+    pred = pred.copy()
+    n = len(pred)
+    pred["time"] = [now + (i + 1) * freq_td for i in range(n)]
+
+    presences = pred["presence"].to_numpy(dtype=float).copy()
+    for i in range(n):
+        v = max(0.0, presences[i])
+        v = float(round(v))
+        if i == 0:
+            v = max(v, float(current_occupancy))
+        presences[i] = v
+    pred["presence"] = presences
+
+    pred["energy_consumed"] = pred["energy_consumed"].clip(lower=0.0)
+    return pred
+
+
 def run_forecast_job(db: Session, job: ForecastJob) -> dict:
     from app.services.ev_forecast.ev_total_forecaster import (  # noqa: WPS433
         ForecasterReg,
@@ -349,7 +416,7 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
         ForecasterSim,
     )
 
-    run_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    run_at = datetime.now(timezone.utc)
     model, ensure_meta = _ensure_model(db, job)
     if model is None:
         reason = ensure_meta.get("error", "unknown")
@@ -372,22 +439,21 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
                 "reason": "model_type_mismatch_expected_ForecasterSim",
                 "rows": 0,
             }
-        ref_end = _pilot_max_session_end(db, job.id_pilot)
-        if ref_end is None:
-            start_time = pd.Timestamp.now(tz="UTC")
-        else:
-            start_time = pd.Timestamp(ref_end)
-            if start_time.tzinfo is None:
-                start_time = start_time.tz_localize("UTC")
-            else:
-                start_time = start_time.tz_convert("UTC")
-        start_time = _floor_to_sim_step(start_time, job.sim_dt_hours)
+        # Use current wall-clock time as simulation origin so observed_counts
+        # reflects vehicles that are connected RIGHT NOW, not historical data.
+        now = pd.Timestamp.now(tz="UTC")
+        start_time = _floor_to_sim_step(now, job.sim_dt_hours)
+        # Query active sessions at actual now, NOT at the floored start_time.
+        # Sessions that connected after the floor boundary (e.g. at 13:07 when
+        # floor is 13:00) would fail start_time <= floored_at and be missed,
+        # causing observed_counts=None and a zero-occupancy forecast.
+        observed_counts = _observed_counts_at(db, job.id_pilot, now)
         pred = model.predict(
             steps=job.sim_steps,
             dt_hours=job.sim_dt_hours,
             power_kw=job.sim_power_kw,
             start_time=start_time,
-            observed_counts=None,
+            observed_counts=observed_counts,
         )
         n = _persist_sim(db, job, pred, run_at=run_at, start_time=start_time)
         return {**out_base, "status": "ok", "rows": n}
@@ -425,9 +491,18 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
         return {**out_base, "status": "skipped", "reason": "format_yielded_no_rows", "rows": 0}
 
     X_last = X.iloc[[-1]]
-    forecast_anchor = X_last.index[-1]
-    if not isinstance(forecast_anchor, pd.Timestamp):
-        forecast_anchor = pd.Timestamp(forecast_anchor)
+
+    # Anchor the reg forecast to now so that predicted timestamps start from the
+    # current moment rather than from the last historical bin (which may be stale).
+    now_reg = pd.Timestamp.now(tz="UTC")
+    freq_td = pd.Timedelta(model.freq)
+    observed_counts = _observed_counts_at(db, job.id_pilot, now_reg)
+    current_occupancy: int = sum(observed_counts.values()) if observed_counts else 0
+    logger.info(
+        "Reg forecast pilot=%s: current_occupancy=%d (per-charger: %s)",
+        job.id_pilot, current_occupancy, observed_counts,
+    )
+    forecast_anchor: pd.Timestamp = now_reg
 
     if job.kind == "reg_prob":
         if not isinstance(model, ForecasterRegProb):
@@ -438,6 +513,7 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
                 "rows": 0,
             }
         pred = model.predict_pdf(X_last)
+        pred = _apply_reg_post_processing(pred, now_reg, freq_td, current_occupancy)
         n = _persist_reg_like(
             db,
             job,
@@ -449,6 +525,7 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
         return {**out_base, "status": "ok", "rows": n}
 
     pred = model.predict(X_last)
+    pred = _apply_reg_post_processing(pred, now_reg, freq_td, current_occupancy)
     n = _persist_reg_like(
         db,
         job,

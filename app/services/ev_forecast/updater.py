@@ -1,12 +1,16 @@
 from datetime import datetime
 from math import sqrt
 from sqlalchemy.orm import Session
-from sqlalchemy import extract
 import numpy as np
 from uuid import uuid4
 
 from app.models import EvForecastStats
-from app.services.common.db_utils import get_db_session, completed_sessions_count
+from app.services.common.db_utils import (
+    get_db_session,
+    completed_sessions_count,
+    get_pilot_tz_for_charger,
+    get_local_hour,
+)
 from app.services.common.constants import GENERIC_CHARGER_ID, MIN_SESSIONS_FOR_CHARGER_SPECIFIC
 from app.models import ChargingSessions
 
@@ -32,7 +36,12 @@ def update_ev_forecast(
     Does NOT commit - caller is responsible for commit.
     """
 
-    hour = start_time.hour
+    # Resolve the pilot's local timezone and compute the local hour for this session.
+    # The same local_hour is used for both the charger-specific and generic charger
+    # records so that the generic charger statistics are indexed in the same space as
+    # the real charger's statistics (i.e. pilot-local time, not UTC).
+    tz_name = get_pilot_tz_for_charger(db, charger_id)
+    local_hour = get_local_hour(start_time, tz_name)
 
     # -----------------------------------
     # Always update GENERIC forecast (append new row)
@@ -40,7 +49,7 @@ def update_ev_forecast(
     _update_or_initialize_stat(
         db,
         charger_id=GENERIC_CHARGER_ID,
-        hour=hour,
+        local_hour=local_hour,
         energy_kwh=energy_kwh,
         duration_hours=duration_hours,
     )
@@ -51,7 +60,7 @@ def update_ev_forecast(
     charger_stat = (
         db.query(EvForecastStats).filter(
             EvForecastStats.id_charger == charger_id,
-            EvForecastStats.hour == hour,
+            EvForecastStats.local_hour == local_hour,
         )
         .order_by(EvForecastStats.updated_at.desc())
         .first()
@@ -71,7 +80,7 @@ def update_ev_forecast(
 
         new_stat = EvForecastStats(
             id=uuid4(),
-            hour=hour,
+            local_hour=local_hour,
             mean_energy_kwh=mean_energy,
             std_energy_kwh=sqrt(energy_var / n),
             mean_duration_hours=mean_duration,
@@ -82,30 +91,34 @@ def update_ev_forecast(
         db.add(new_stat)
 
     else:
-        # check sessions to decide whether to initialize a new charger-specific stat
-        sessions = (
-                db.query(ChargingSessions)
-                .filter(
-                    ChargingSessions.id_charger == charger_id,
-                    extract("hour", ChargingSessions.start_time) == hour,
-                )
-                .all()
+        # Load all completed sessions for this charger, then filter to the
+        # current local hour in Python (avoids SQL-level UTC hour extraction).
+        all_sessions = (
+            db.query(ChargingSessions)
+            .filter(
+                ChargingSessions.id_charger == charger_id,
+                ChargingSessions.end_time.isnot(None),
             )
+            .all()
+        )
+        sessions = [
+            s for s in all_sessions
+            if s.start_time is not None and get_local_hour(s.start_time, tz_name) == local_hour
+        ]
 
-        count = len(sessions)
-        if count >= MIN_SESSIONS_FOR_CHARGER_SPECIFIC:
+        if len(sessions) >= MIN_SESSIONS_FOR_CHARGER_SPECIFIC:
             _initialize_new_stat(
                 db,
                 charger_id,
-                hour,
-                sessions
+                local_hour,
+                sessions,
             )
 
 
 def _update_or_initialize_stat(
     db: Session,
     charger_id: str,
-    hour: int,
+    local_hour: int,
     energy_kwh: float,
     duration_hours: float,
 ):
@@ -117,7 +130,7 @@ def _update_or_initialize_stat(
         db.query(EvForecastStats)
         .filter(
             EvForecastStats.id_charger == charger_id,
-            EvForecastStats.hour == hour,
+            EvForecastStats.local_hour == local_hour,
         )
         .order_by(EvForecastStats.updated_at.desc())
         .first()
@@ -127,7 +140,7 @@ def _update_or_initialize_stat(
         # Create initial stat row
         stat = EvForecastStats(
             id=uuid4(),
-            hour=hour,
+            local_hour=local_hour,
             mean_energy_kwh=energy_kwh,
             std_energy_kwh=0.0,
             mean_duration_hours=duration_hours,
@@ -151,7 +164,7 @@ def _update_or_initialize_stat(
 
     stat = EvForecastStats(
         id=uuid4(),
-        hour=hour,
+        local_hour=local_hour,
         mean_energy_kwh=mean_energy,
         std_energy_kwh=sqrt(energy_var / n),
         mean_duration_hours=mean_duration,
@@ -165,11 +178,14 @@ def _update_or_initialize_stat(
 def _initialize_new_stat(
     db: Session,
     charger_id: str,
-    hour: int,
+    local_hour: int,
     sessions: list[ChargingSessions],
 ):
     energy_values = [s.energy_delivered_kwh for s in sessions]
-    duration_values = [(s.end_charging_time - s.start_time).total_seconds() / 3600 for s in sessions]
+    duration_values = [
+        (s.end_charging_time - s.start_time).total_seconds() / 3600
+        for s in sessions
+    ]
 
     mean_energy = float(np.mean(energy_values))
     std_energy = float(np.std(energy_values, ddof=0))
@@ -179,12 +195,12 @@ def _initialize_new_stat(
 
     stat = EvForecastStats(
         id=uuid4(),
-        hour=hour,
+        local_hour=local_hour,
         mean_energy_kwh=mean_energy,
         std_energy_kwh=std_energy,
         mean_duration_hours=mean_duration,
         std_duration_hours=std_duration,
-        sample_count= sample_count,
+        sample_count=sample_count,
         id_charger=charger_id,
     )
     db.add(stat)

@@ -47,7 +47,47 @@ def manifest_path() -> Path:
     return Path(__file__).resolve().parent / "ev_total_forecast_jobs.yaml"
 
 
-def load_forecast_jobs() -> list[ForecastJob]:
+def _jobs_from_db() -> list[ForecastJob]:
+    """Load forecast jobs from the database. Returns empty list on any error."""
+    try:
+        from app.db.session import SessionLocal
+        from app.models import ForecastJobDB
+
+        db = SessionLocal()
+        try:
+            rows = db.query(ForecastJobDB).all()
+            jobs: list[ForecastJob] = []
+            for row in rows:
+                kind = str(row.kind).lower()
+                if kind not in ("reg", "reg_prob", "sim"):
+                    kind = "reg"
+                jobs.append(
+                    ForecastJob(
+                        id=row.job_id,
+                        id_pilot=row.id_pilot,
+                        enabled=row.enabled,
+                        predict_periodicity_minutes=row.predict_periodicity_minutes,
+                        artifact_path=row.artifact_path,
+                        kind=kind,  # type: ignore[arg-type]
+                        sim_steps=row.sim_steps,
+                        sim_dt_hours=row.sim_dt_hours,
+                        sim_power_kw=row.sim_power_kw,
+                        freq=row.freq,
+                        timezone=row.timezone,
+                        cal_fraction=row.cal_fraction,
+                        horizon=row.horizon,
+                        lags=([int(x) for x in row.lags] if isinstance(row.lags, list) else None),
+                    )
+                )
+            return jobs
+        finally:
+            db.close()
+    except Exception:
+        return []
+
+
+def _jobs_from_yaml() -> list[ForecastJob]:
+    """Load forecast jobs from the YAML manifest file (local dev fallback)."""
     path = manifest_path()
     if not path.is_file():
         return []
@@ -83,6 +123,11 @@ def load_forecast_jobs() -> list[ForecastJob]:
             )
         )
     return jobs
+
+
+def load_forecast_jobs() -> list[ForecastJob]:
+    """Load forecast jobs from the database."""
+    return _jobs_from_db()
 
 
 def get_job_by_id(job_id: str) -> ForecastJob | None:

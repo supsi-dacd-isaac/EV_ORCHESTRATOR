@@ -130,7 +130,7 @@ class OwnersRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class EvDurationCdfCreate(BaseModel):
-    hour: int
+    local_hour: int
     horizon_hours: float
     probability: float
     sample_count: int
@@ -138,7 +138,7 @@ class EvDurationCdfCreate(BaseModel):
 
 class EvDurationCdfUpdate(BaseModel):
     id: Optional[UUID] = None
-    hour: Optional[int] = None
+    local_hour: Optional[int] = None
     horizon_hours: Optional[float] = None
     probability: Optional[float] = None
     sample_count: Optional[int] = None
@@ -147,7 +147,7 @@ class EvDurationCdfUpdate(BaseModel):
 
 class EvDurationCdfRead(BaseModel):
     id: UUID
-    hour: int
+    local_hour: int
     horizon_hours: float
     probability: float
     sample_count: int
@@ -158,20 +158,23 @@ class EvDurationCdfRead(BaseModel):
 class PilotCreate(BaseModel):
     name: str
     id_owner: UUID
+    timezone_name: str = "Europe/Zurich"
 
 class PilotUpdate(BaseModel):
     id: Optional[UUID] = None
     name: Optional[str] = None
     id_owner: Optional[UUID] = None
+    timezone_name: Optional[str] = None
 
 class PilotRead(BaseModel):
     id: UUID
     name: str
     id_owner: UUID
+    timezone_name: str
     model_config = ConfigDict(from_attributes=True)
 
 class EvForecastStatsCreate(BaseModel):
-    hour: int
+    local_hour: int
     mean_energy_kwh: float
     std_energy_kwh: float
     mean_duration_hours: float
@@ -181,7 +184,7 @@ class EvForecastStatsCreate(BaseModel):
 
 class EvForecastStatsUpdate(BaseModel):
     id: Optional[UUID] = None
-    hour: Optional[int] = None
+    local_hour: Optional[int] = None
     mean_energy_kwh: Optional[float] = None
     std_energy_kwh: Optional[float] = None
     mean_duration_hours: Optional[float] = None
@@ -192,7 +195,7 @@ class EvForecastStatsUpdate(BaseModel):
 
 class EvForecastStatsRead(BaseModel):
     id: UUID
-    hour: int
+    local_hour: int
     mean_energy_kwh: float
     std_energy_kwh: float
     mean_duration_hours: float
@@ -249,4 +252,57 @@ class EvPilotForecastTimeseriesRead(BaseModel):
     energy_kwh: float
     artifact_name: str
     quantiles_json: Optional[dict[str, Any]] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ForecastJobCreate(BaseModel):
+    job_id: str
+    id_pilot: UUID
+    enabled: bool = False
+    predict_periodicity_minutes: int = 1
+    artifact_path: str
+    kind: str = "reg"
+    freq: str = "15min"
+    timezone: str = "UTC"
+    horizon: Optional[int] = None
+    sim_steps: int = 24
+    sim_dt_hours: float = 1.0
+    sim_power_kw: float = 11.0
+    cal_fraction: float = 0.2
+    lags: Optional[list[int]] = None
+
+
+class ForecastJobUpdate(BaseModel):
+    job_id: Optional[str] = None
+    enabled: Optional[bool] = None
+    predict_periodicity_minutes: Optional[int] = None
+    artifact_path: Optional[str] = None
+    kind: Optional[str] = None
+    freq: Optional[str] = None
+    timezone: Optional[str] = None
+    horizon: Optional[int] = None
+    sim_steps: Optional[int] = None
+    sim_dt_hours: Optional[float] = None
+    sim_power_kw: Optional[float] = None
+    cal_fraction: Optional[float] = None
+    lags: Optional[list[int]] = None
+
+
+class ForecastJobRead(BaseModel):
+    id: UUID
+    job_id: str
+    id_pilot: UUID
+    enabled: bool
+    predict_periodicity_minutes: int
+    artifact_path: str
+    kind: str
+    freq: str
+    timezone: str
+    horizon: Optional[int]
+    sim_steps: int
+    sim_dt_hours: float
+    sim_power_kw: float
+    cal_fraction: float
+    lags: Optional[list[int]]
+    updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

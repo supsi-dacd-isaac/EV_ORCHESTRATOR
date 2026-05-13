@@ -25,7 +25,7 @@ def get_cumulative_duration_probability(
             db.query(EvDurationCdf)
             .filter(
                 EvDurationCdf.id_charger == charger_id,
-                EvDurationCdf.hour == -1, #TODO: consider hour-specific CDFs in the future, when not available fallback to hour=-1
+                EvDurationCdf.local_hour == -1, #TODO: consider hour-specific CDFs in the future, when not available fallback to local_hour=-1
             )
             .order_by(EvDurationCdf.sample_count.desc(), EvDurationCdf.updated_at.desc(), EvDurationCdf.horizon_hours)
             .all()
@@ -42,7 +42,7 @@ def get_cumulative_duration_probability(
                 db.query(EvDurationCdf)
                 .filter(
                     EvDurationCdf.id_charger == GENERIC_CHARGER_ID,
-                    EvDurationCdf.hour == -1,
+                    EvDurationCdf.local_hour == -1,
                 )
                 .order_by(EvDurationCdf.sample_count.desc(), EvDurationCdf.updated_at.desc(), EvDurationCdf.horizon_hours)
                 .all()

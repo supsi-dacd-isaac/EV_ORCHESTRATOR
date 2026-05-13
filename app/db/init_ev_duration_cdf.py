@@ -12,7 +12,7 @@ def init_ev_duration_cdf(charger_id: str):
                 EvDurationCdf(
                     id=uuid.uuid4(),
                     id_charger=charger_id,
-                    hour=-1,
+                    local_hour=-1,
                     horizon_hours=horizon,
                     probability=prob,
                     sample_count=sample_count,

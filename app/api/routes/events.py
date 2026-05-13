@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import uuid4
@@ -13,6 +13,7 @@ from app.services.load_forecast.load_forecaster_service import forecast_load
 from app.services.orchestrator.orchestrator_service import compute_and_save_action
 from app.services.ev_forecast.updater import update_ev_forecast
 from app.services.orchestrator.duration_cdf.updater import update_ev_duration_cdf
+from app.services.common.db_utils import to_utc, to_response_tz, get_pilot_tz_for_charger
 from app.services.common.auth import TokenData, get_current_user
 from app.services.common.authorization import (
     ensure_charger_access,
@@ -129,7 +130,7 @@ def vehicle_connected(
         # create DB charging session (initial placeholders for end times and duration)
         new_session = ChargingSessions(
             id=uuid4(),
-            start_time=event.timestamp,
+            start_time=to_utc(event.timestamp),
             # end_time=event.timestamp,
             # end_charging_time=event.timestamp,
             # duration=0.0,
@@ -218,7 +219,7 @@ def charging_update(
         # session.avg_measured_power_kw = event.avg_power_last_15min_kw
         session.is_fully_charged = event.is_fully_charged
         if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
-            session.end_charging_time = event.timestamp
+            session.end_charging_time = to_utc(event.timestamp)
 
         # 3. Call load forecaster
         community_load_kw = forecast_load()
@@ -285,19 +286,27 @@ def vehicle_disconnected(
         # 2. Update session final state
         session.energy_delivered_kwh = session.energy_delivered_kwh + event.energy_delivered_kwh
         if session.end_charging_time is None:
-            session.end_charging_time = event.timestamp
-        session.end_time = event.timestamp
-        session.duration = (session.end_time - session.start_time).total_seconds()/3600
+            session.end_charging_time = to_utc(event.timestamp)
+        session.end_time = to_utc(event.timestamp)
+        session.duration = (session.end_time - session.start_time).total_seconds() / 3600
         session.active = False
 
         # persist changes (but don't commit yet)
         db.flush()
 
+        caller_tz = event.timestamp.tzinfo if event.timestamp.tzinfo is not None else None
+        # When caller did not supply a timezone, fall back to the pilot's local timezone
+        # so the response datetimes are meaningful rather than silently UTC.
+        if caller_tz is None:
+            pilot_tz_name = get_pilot_tz_for_charger(db, str(session.id_charger))
+            response_tz = pilot_tz_name
+        else:
+            response_tz = caller_tz
         session_summary = {
             "charger_id": session.id_charger,
-            "start_time": session.start_time,
-            "disconnection_time": event.timestamp,
-            "end_charging_time": session.end_charging_time,
+            "start_time": to_response_tz(session.start_time, response_tz),
+            "disconnection_time": to_response_tz(event.timestamp, response_tz),
+            "end_charging_time": to_response_tz(session.end_charging_time, response_tz),
             "charged_energy_kwh": session.energy_delivered_kwh,
             "forecasted_energy_kwh": session.forecasted_energy_kwh,
             "forecasted_duration_hours": session.forecasted_duration_hours,
@@ -341,7 +350,10 @@ def vehicle_disconnected(
         db.close()
 
 @router.get("/active_sessions")
-def get_active_sessions(current_user: TokenData = Depends(get_current_user)):
+def get_active_sessions(
+    current_user: TokenData = Depends(get_current_user),
+    tz: str = Query(default=None, description="Timezone for timestamps in the response, e.g. 'Europe/Zurich'. Defaults to each charger's pilot timezone."),
+):
     """
     Return all charging sessions currently active
     """
@@ -371,15 +383,18 @@ def get_active_sessions(current_user: TokenData = Depends(get_current_user)):
             is_fully = latest_action.is_fully_charged if latest_action else None
             last_update = latest_action.current_time if latest_action else s.updated_at
 
+            # Use caller-supplied tz; when not provided, use the charger's pilot tz.
+            effective_tz = tz if tz is not None else get_pilot_tz_for_charger(db, str(s.id_charger))
+
             result[str(s.id)] = {
                 "charger_id": (str(s.id_charger) if s.id_charger else None),
-                "start_time": s.start_time,
+                "start_time": to_response_tz(s.start_time, effective_tz),
                 "energy_delivered_kwh": s.energy_delivered_kwh,
                 "forecasted_energy_kwh": s.forecasted_energy_kwh,
                 "forecasted_duration_hours": s.forecasted_duration_hours,
                 "avg_measured_power_kw": avg_measured_power,
                 "is_fully_charged": is_fully,
-                "last_update_time": last_update,
+                "last_update_time": to_response_tz(last_update, effective_tz),
             }
 
         return result
@@ -390,6 +405,7 @@ def get_active_sessions(current_user: TokenData = Depends(get_current_user)):
 def get_active_sessions_by_pilot(
     pilot_id: str,
     current_user: TokenData = Depends(get_current_user),
+    tz: str = Query(default=None, description="Timezone for timestamps in the response. Defaults to the pilot's timezone."),
 ):
     """
     Return all charging sessions currently active for a specific pilot
@@ -405,6 +421,9 @@ def get_active_sessions_by_pilot(
             allow_guest=False,
             require_user_ownership=True,
         )
+
+        # Use caller-supplied tz; when not provided, use the pilot's own timezone.
+        effective_tz = tz if tz is not None else pilot.timezone_name
 
         # Get active sessions for chargers associated with this pilot
         sessions = (
@@ -430,13 +449,13 @@ def get_active_sessions_by_pilot(
 
             result[str(s.id)] = {
                 "charger_id": (str(s.id_charger) if s.id_charger else None),
-                "start_time": s.start_time,
+                "start_time": to_response_tz(s.start_time, effective_tz),
                 "energy_delivered_kwh": s.energy_delivered_kwh,
                 "forecasted_energy_kwh": s.forecasted_energy_kwh,
                 "forecasted_duration_hours": s.forecasted_duration_hours,
                 "avg_measured_power_kw": avg_measured_power,
                 "is_fully_charged": is_fully,
-                "last_update_time": last_update,
+                "last_update_time": to_response_tz(last_update, effective_tz),
             }
 
         return result
@@ -452,6 +471,7 @@ def get_active_sessions_by_pilot(
 def get_active_sessions_by_owner(
     owner_id: str,
     current_user: TokenData = Depends(get_current_user),
+    tz: str = Query(default=None, description="Timezone for timestamps in the response. Defaults to each charger's pilot timezone."),
 ):
     """
     Return all charging sessions currently active for a specific owner
@@ -489,15 +509,18 @@ def get_active_sessions_by_owner(
             is_fully = latest_action.is_fully_charged if latest_action else None
             last_update = latest_action.current_time if latest_action else s.updated_at
 
+            # Use caller-supplied tz; when not provided, use the charger's pilot tz.
+            effective_tz = tz if tz is not None else get_pilot_tz_for_charger(db, str(s.id_charger))
+
             result[str(s.id)] = {
                 "charger_id": (str(s.id_charger) if s.id_charger else None),
-                "start_time": s.start_time,
+                "start_time": to_response_tz(s.start_time, effective_tz),
                 "energy_delivered_kwh": s.energy_delivered_kwh,
                 "forecasted_energy_kwh": s.forecasted_energy_kwh,
                 "forecasted_duration_hours": s.forecasted_duration_hours,
                 "avg_measured_power_kw": avg_measured_power,
                 "is_fully_charged": is_fully,
-                "last_update_time": last_update,
+                "last_update_time": to_response_tz(last_update, effective_tz),
             }
 
         return result

@@ -9,6 +9,7 @@ colorama==0.4.6
 cryptography==46.0.5
 ecdsa==0.19.1
 fastapi==0.125.0
+python-multipart==0.0.20
 filelock==3.20.3
 fsspec==2026.1.0
 greenlet==3.3.0
@@ -49,6 +50,7 @@ watchfiles==1.1.1
 websockets==15.0.1
 celery==5.4.0
 lightgbm==4.5.0
+scikit-learn==1.6.1
 pandas==2.2.3
 redis==5.2.1
 celery-redbeat==2.2.0

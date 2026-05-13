@@ -2,7 +2,7 @@ import uuid
 
 from app.config import ADMIN_INIT_COMPANY, ADMIN_INIT_PASSWORD, ADMIN_INIT_USER
 from app.db.session import SessionLocal, engine
-from app.models import Base, Chargers, ChargingSessions, EvForecastStats, EvDurationCdf, Owners, Actions, GridLoadForecasted
+from app.models import Base, Chargers, ChargingSessions, EvForecastStats, EvDurationCdf, Owners, Actions, GridLoadForecasted, EvPilotForecastTimeseries
 from app.services.common.auth import hash_password
 from app.services.common.constants import GENERIC_CHARGER_ID
 
@@ -53,3 +53,5 @@ def _seed_admin():
         print(f"Created initial admin user '{ADMIN_INIT_USER}' and generic charger.")
     finally:
         db.close()
+
+

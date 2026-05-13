@@ -1,6 +1,8 @@
 from typing import Dict, List
 from datetime import datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +13,7 @@ from app.services.orchestrator.duration_cdf.query import get_cumulative_duration
 from app.services.orchestrator.disconnection_probability import get_disconnection_prob
 from app.services.orchestrator.constants import OBSERVATION_SIZE
 from app.services.orchestrator.policy.policy_loader import get_policy
+from app.config import ACTOR_MODEL_PATH
 
 
 def compute_and_save_action(
@@ -38,16 +41,28 @@ def compute_and_save_action(
     - valid_until (timestamp)
     """
 
-    # compute disconnection statistics (fresh session -> duration 0)
-    connected_hours = (timestamp - time_connection).total_seconds() / 3600
+    # Normalize both to UTC-aware — DB convention is TIMESTAMP WITH TIME ZONE.
+    # All event timestamps from the API may be tz-aware or naive (assumed UTC).
+    from app.services.common.db_utils import to_utc, to_pilot_time, get_pilot_tz_for_charger
+    ts_utc = to_utc(timestamp)
+    tc_utc = to_utc(time_connection)
+
+    # Resolve the pilot's local timezone and convert both timestamps to pilot-local
+    # time so that observation features (e.g. hour-of-day) are expressed in local
+    # time rather than UTC.
+    pilot_tz_name = get_pilot_tz_for_charger(db, charger_id)
+    ts_local = to_pilot_time(ts_utc, pilot_tz_name)
+    tc_local = to_pilot_time(tc_utc, pilot_tz_name)
+
+    connected_hours = (ts_utc - tc_utc).total_seconds() / 3600
     prob_discon = get_disconnection_prob(charger_id, connected_hours)
     cum_prob = get_cumulative_duration_probability(charger_id, connected_hours)
 
     obs = prepare_observation(
         charger_id=charger_id,
         is_fully_charged=is_fully_charged,
-        time_connection=time_connection,
-        time_current=timestamp,
+        time_connection=tc_local,
+        time_current=ts_local,
         forecasted_duration_hours=forecasted_duration_hours,
         forecasted_energy_kwh=forecasted_energy_kwh,
         current_power_kw=current_power_kw,
@@ -60,21 +75,18 @@ def compute_and_save_action(
         cumulative_duration_probability=cum_prob
     )
 
-    print(f'The observation for charger {charger_id} at {timestamp} is: {obs}')
+    print(f'The observation for charger {charger_id} at {ts_local} (local) is: {obs}')
     assert obs.shape == (OBSERVATION_SIZE,), (
         f"Invalid observation shape {obs.shape}, expected ({OBSERVATION_SIZE},)"
     )
     policy = get_policy()
     charge = bool(policy.compute_action(obs))
     print(f'Policy action is charge={charge}')
-    #
-    # #Dummy logic
-    # if is_fully_charged or energy_delivered_kwh >= forecasted_energy_kwh:
-    #     charge = False
-    # else:
-    #     charge = True
 
-    valid_until = timestamp + timedelta(minutes=15)
+    # Return valid_until in the caller's timezone if one was provided, otherwise
+    # use the pilot's local timezone so the response datetime is always meaningful.
+    response_tz = timestamp.tzinfo if timestamp.tzinfo is not None else ZoneInfo(pilot_tz_name)
+    valid_until = (ts_utc + timedelta(minutes=15)).astimezone(response_tz)
 
     # -----------------------------
     # Persist action
@@ -82,7 +94,7 @@ def compute_and_save_action(
 
     action_row = Actions(
         id=action_id,
-        current_time=timestamp,
+        current_time=ts_utc,  # UTC-aware — matches TIMESTAMP WITH TIME ZONE column
         current_power_kw=current_power_kw,
         energy_delivered_kwh=energy_delivered_kwh,
         is_fully_charged=is_fully_charged,
@@ -90,6 +102,7 @@ def compute_and_save_action(
         cumulative_duration_probability=cum_prob,
         action="charge" if charge else "not_charge",
         id_cs=session_id,
+        policy=Path(ACTOR_MODEL_PATH).name,
     )
 
     db.add(action_row)

@@ -17,7 +17,7 @@ These should be environment-driven so each institute can set them without changi
 - Runtime values are read from environment variables (and from `.env` locally).
 - Local template is `.env.example` (safe defaults/placeholders only).
 - Real `.env` is ignored by git via `.gitignore`.
-- Docker Compose loads values from `../.env`.
+- Docker Compose loads values from `.env` at the project root.
 - `app/run_debug.py` is local-only and excluded from git/docker artifacts.
 
 ## Suggested deployment practice

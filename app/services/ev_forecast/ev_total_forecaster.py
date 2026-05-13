@@ -247,7 +247,9 @@ class ForecasterSim:
 
         for s, obs in observed_stations_evs.items():
             if s not in self.state:
-                continue
+                # Station not seen during training (no completed sessions for this
+                # charger yet). Initialize it so its connected EVs are tracked.
+                self.state[s] = {}
             cur_ids = list(self.state[s].keys())
             diff = len(cur_ids) - int(obs)
             if diff > 0:
@@ -262,21 +264,54 @@ class ForecasterSim:
 
         need: dict[str, int] = {}
         for s, obs in observed_stations_evs.items():
-            if s not in self.state:
-                continue
-            cur = len(self.state[s])
+            cur = len(self.state[s])  # state[s] is guaranteed to exist after loop above
             if obs > cur:
                 need[s] = int(obs - cur)
-        if need:
+
+        # Split: known stations go through sample_new_evs (uses connection_dists);
+        # unknown stations (no training data) get EVs injected directly from the
+        # global session pool so capacity/distribution limits don't silently block them.
+        known_need = {s: n for s, n in need.items() if s in self.station_capacities}
+        unknown_need = {s: n for s, n in need.items() if s not in self.station_capacities}
+
+        if known_need:
             admitted = self.sample_new_evs(
                 time_index=time_index,
-                new_evs=need,
+                new_evs=known_need,
                 respect_capacity=False,
             )
             for s, ids in admitted.items():
                 added[s].extend(ids)
 
-        final_counts = {s: len(self.state[s]) for s in self.station_capacities}
+        # Force-inject any EVs that sample_new_evs failed to admit (resample limit exhausted).
+        # Ground-truth observed counts must be honoured regardless of distribution validity.
+        # Use a fixed physics-safe pair (T=8h, E=30kWh) so the EV survives multiple
+        # simulation steps without violating the charging-power constraint.
+        for s, n in known_need.items():
+            shortfall = n - len(added.get(s, []))
+            if shortfall > 0:
+                for _ in range(shortfall):
+                    ev_id = self._gen_ev_id()
+                    self.state[s][ev_id] = {"remaining_time": 8.0, "remaining_energy": 30.0}
+                    added.setdefault(s, []).append(ev_id)
+
+        if unknown_need:
+            hour = int(time_index.hour)
+            for s, n in unknown_need.items():
+                for _ in range(n):
+                    try:
+                        pair = self._sample_session_pair(s, hour, size=1)[0]
+                        T, E = float(pair[0]), float(pair[1])
+                    except Exception:
+                        T, E = 2.0, 10.0  # conservative fallback
+                    ev_id = self._gen_ev_id()
+                    self.state[s][ev_id] = {
+                        "remaining_time": T,
+                        "remaining_energy": E,
+                    }
+                    added.setdefault(s, []).append(ev_id)
+
+        final_counts = {s: len(self.state[s]) for s in self.state}
         return {"removed": removed, "added": added, "final_counts": final_counts}
 
     def predict(

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models import EvForecastStats
 from app.services.common.constants import GENERIC_CHARGER_ID
+from app.services.common.db_utils import get_pilot_tz_for_charger, get_local_hour
 
 
 def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float, float, float]:
@@ -16,20 +17,22 @@ def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float
     - forecasted_duration_hours
     - std_duration_hours
 
-    Uses the latest stored EvForecastStats row (by updated_at) for the given charger/hour.
+    Uses the latest stored EvForecastStats row (by updated_at) for the given charger/local_hour.
     Falls back to GENERIC_CHARGER_ID if charger-specific stats are not present.
     """
 
-    connection_hour = int(start_time.hour)
     db: Session = SessionLocal()
 
     try:
+        tz_name = get_pilot_tz_for_charger(db, charger_id)
+        connection_local_hour = get_local_hour(start_time, tz_name)
+
         # Try charger-specific forecast
         stat = (
             db.query(EvForecastStats)
             .filter(
                 EvForecastStats.id_charger == charger_id,
-                EvForecastStats.hour == connection_hour,
+                EvForecastStats.local_hour == connection_local_hour,
             )
             .order_by(EvForecastStats.updated_at.desc())
             .first()
@@ -41,7 +44,7 @@ def get_ev_forecast(charger_id: str, start_time: datetime) -> Tuple[float, float
                 db.query(EvForecastStats)
                 .filter(
                     EvForecastStats.id_charger == GENERIC_CHARGER_ID,
-                    EvForecastStats.hour == connection_hour,
+                    EvForecastStats.local_hour == connection_local_hour,
                 )
                 .order_by(EvForecastStats.updated_at.desc())
                 .first()
