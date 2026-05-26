@@ -41,6 +41,8 @@ class Pilot(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     id_owner: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     timezone_name: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'Europe/Zurich'"))
+    forecast_meter: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    forecast_site: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
@@ -171,6 +173,7 @@ class GridLoadForecasted(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     value: Mapped[float] = mapped_column(Double(53), nullable=False)
+    forecast_timestamp: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     id_action: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
     actions: Mapped[Optional['Actions']] = relationship('Actions', back_populates='grid_load_forecasted')

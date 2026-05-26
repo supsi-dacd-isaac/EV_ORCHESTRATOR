@@ -20,7 +20,9 @@ import argparse
 import json
 import random
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -112,17 +114,27 @@ def active_sessions(client: Client, label: str = "") -> dict:
 
 def forecast_occupancy(client: Client, pilot_id: str, label: str = "") -> None:
     r = client.get(f"/forecaster/pilot/{pilot_id}/total_occupancy")
-    body = show(f"FORECAST total_occupancy{' — ' + label if label else ''}", r)
-    if isinstance(body, list) and len(body) == 0:
-        print("  ℹ  Empty — Celery has not yet produced a forecast for this pilot.")
-        print("     Enable a job for this pilot_id in ev_total_forecast_jobs.yaml and wait ~1 min.")
+    body = show(f"FORECAST total_occupancy{' \u2014 ' + label if label else ''}", r)
+    if isinstance(body, list):
+        if len(body) == 0:
+            print("  \u2139  Empty \u2014 Celery has not yet produced a forecast for this pilot.")
+            print("     Enable a job for this pilot_id in ev_total_forecast_jobs.yaml and wait ~1 min.")
+        else:
+            print(f"\n  {'Timestamp':<35}  {'Occupancy':>10}")
+            for entry in body:
+                print(f"  {entry['timestamp']:<35}  {entry['occupancy']:>10.3f}")
 
 
 def forecast_energy(client: Client, pilot_id: str, label: str = "") -> None:
     r = client.get(f"/forecaster/pilot/{pilot_id}/total_energy")
-    body = show(f"FORECAST total_energy{' — ' + label if label else ''}", r)
-    if isinstance(body, list) and len(body) == 0:
-        print("  ℹ  Empty — Celery has not yet produced a forecast for this pilot.")
+    body = show(f"FORECAST total_energy{' \u2014 ' + label if label else ''}", r)
+    if isinstance(body, list):
+        if len(body) == 0:
+            print("  \u2139  Empty \u2014 Celery has not yet produced a forecast for this pilot.")
+        else:
+            print(f"\n  {'Timestamp':<35}  {'Energy kWh':>12}")
+            for entry in body:
+                print(f"  {entry['timestamp']:<35}  {entry['energy_kWh']:>12.3f}")
 
 
 def simulate_historical_session(
@@ -224,9 +236,11 @@ def make_chargers(
     n: int = 5,
 ) -> list[str]:
     ids = []
+    existing_by_name: dict | None = None
     for i in range(1, n + 1):
+        name = f"{prefix}-C{i:02d}"
         r = admin.post("/db/chargers", json={
-            "name": f"{prefix}-C{i:02d}",
+            "name": name,
             "type": "AC",
             "latitude": round(46.0 + rng.uniform(-0.5, 0.5), 6),
             "longitude": round(8.9 + rng.uniform(-0.5, 0.5), 6),
@@ -238,14 +252,42 @@ def make_chargers(
         if r.ok:
             ids.append(r.json()["id"])
         else:
-            print(f"  [WARN] Failed to create {prefix}-C{i:02d}: {r.text[:80]}")
-    print(f"  Created {len(ids)}/{n} chargers for {prefix}")
+            print(f"  [WARN] {name}: API replied {r.status_code} — {r.text[:120]}")
+            if existing_by_name is None:
+                existing_by_name = {c["name"]: c["id"] for c in admin.get("/db/chargers").json()}
+            if name in existing_by_name:
+                ids.append(existing_by_name[name])
+                print(f"  ℹ  Using existing {name}: {existing_by_name[name]}")
+            else:
+                print(f"  ✗  {name} not found in existing chargers — skipping")
+    print(f"  Resolved {len(ids)}/{n} chargers for {prefix}")
     return ids
 
 
 # ── Main script ───────────────────────────────────────────────────────────────
 
 def main(skip_history: bool = False) -> None:
+
+    # ── 0. Signup (public self-registration) ────────────────────────────────
+    section("STEP 0 — SIGNUP  (public self-registration endpoint)")
+    r = requests.post(f"{BASE_URL}/auth/signup", json={
+        "user": "signup_test_user",
+        "password": "signup_password",
+        "company_name": "SignupTestCo",
+    })
+    show("SIGNUP new user (expect 201)", r)
+
+    # Duplicate signup → expect 400 or 409
+    r = requests.post(f"{BASE_URL}/auth/signup", json={
+        "user": "signup_test_user",
+        "password": "signup_password",
+        "company_name": "SignupTestCo",
+    })
+    show("SIGNUP duplicate user (expect 400/409)", r)
+
+    # Confirm signed-up user can log in with their new credentials
+    signup_client = Client().login("signup_test_user", "signup_password")
+    signup_client.logout()
 
     # ── 1. Login as admin ────────────────────────────────────────────────────
     section("STEP 1 — LOGIN AS ADMIN")
@@ -261,7 +303,11 @@ def main(skip_history: bool = False) -> None:
         "type": "user-adv",
     })
     uadv_data = show("CREATE user_adv (role=user)", r)
-    r.raise_for_status()
+    if r.status_code == 400 and "already exists" in str(uadv_data.get("detail", "")):
+        print("  ℹ  user_adv already exists — fetching existing record")
+        uadv_data = next(o for o in admin.get("/db/owners").json() if o["user"] == "user_adv")
+    else:
+        r.raise_for_status()
     user_adv_id: str = uadv_data["id"]
 
     # ── 3. Create guest owner ────────────────────────────────────────────────
@@ -273,23 +319,45 @@ def main(skip_history: bool = False) -> None:
         "role": "guest",
         "type": "guest",
     })
-    show("CREATE guest_user (role=guest)", r)
-    r.raise_for_status()
+    guest_data = show("CREATE guest_user (role=guest)", r)
+    if r.status_code == 400 and "already exists" in str(guest_data.get("detail", "")):
+        print("  ℹ  guest_user already exists — skipping")
+    else:
+        r.raise_for_status()
 
     # ── 4. Create 3 pilots ───────────────────────────────────────────────────
     section("STEP 4 — CREATE 3 PILOTS  (2 owned by admin, 1 by user-adv)")
 
-    r = admin.post("/db/pilots", json={"name": "Pilot-Admin-1", "id_owner": admin.owner_id})
-    show("CREATE Pilot-Admin-1", r); r.raise_for_status()
-    pilot1_id: str = r.json()["id"]
+    def _get_or_create_pilot(client: Client, name: str, payload: dict) -> str:
+        r = client.post("/db/pilots", json=payload)
+        body = show(f"CREATE {name}", r)
+        if r.ok:
+            return body["id"]
+        print(f"  ℹ  {name} creation failed ({r.status_code}) — looking up by name")
+        match = next((p for p in client.get("/db/pilots").json() if p["name"] == name), None)
+        if match:
+            print(f"  ✓  Found existing {name}: {match['id']}")
+            return match["id"]
+        r.raise_for_status()  # truly unexpected error — stop here
 
-    r = admin.post("/db/pilots", json={"name": "Pilot-Admin-2", "id_owner": admin.owner_id})
-    show("CREATE Pilot-Admin-2", r); r.raise_for_status()
-    pilot2_id: str = r.json()["id"]
+    pilot1_id: str = _get_or_create_pilot(
+        admin, "Pilot-Admin-1",
+        {"name": "Pilot-Admin-1", "id_owner": admin.owner_id, "timezone_name": "Europe/Zurich"},
+    )
+    pilot2_id: str = _get_or_create_pilot(
+        admin, "Pilot-Admin-2",
+        {"name": "Pilot-Admin-2", "id_owner": admin.owner_id, "timezone_name": "Europe/London"},
+    )
+    pilot3_id: str = _get_or_create_pilot(
+        admin, "Pilot-UserAdv-3",
+        {"name": "Pilot-UserAdv-3", "id_owner": user_adv_id, "timezone_name": "Europe/London"},
+    )
 
-    r = admin.post("/db/pilots", json={"name": "Pilot-UserAdv-3", "id_owner": user_adv_id})
-    show("CREATE Pilot-UserAdv-3", r); r.raise_for_status()
-    pilot3_id: str = r.json()["id"]
+    # Timezone objects matching each pilot's configured timezone_name.
+    # Used from step 9 onwards to produce tz-aware event timestamps.
+    pilot1_tz = ZoneInfo("Europe/Zurich")  # Pilot-Admin-1   → CET/CEST (+1/+2)
+    pilot2_tz = ZoneInfo("Europe/London")  # Pilot-Admin-2   → GMT/BST  (0/+1)
+    pilot3_tz = ZoneInfo("Europe/London")  # Pilot-UserAdv-3 → GMT/BST  (0/+1)
 
     # ── 5. Create 10 chargers per pilot ──────────────────────────────────────
     section("STEP 5 — CREATE 10 CHARGERS PER PILOT (30 total)")
@@ -332,13 +400,12 @@ def main(skip_history: bool = False) -> None:
     section("STEP 6b — LIST FORECAST JOBS (admin) + ENABLE PILOT-ADMIN-1 & PILOT-ADMIN-2")
     r = admin.get("/db/forecast_jobs")
     show("LIST all forecast jobs", r)
-    for pid, label in [(pilot1_id, "Pilot-Admin-1"), (pilot2_id, "Pilot-Admin-2")]:
-        r = admin.patch(f"/forecaster/pilot/{pid}/forecast_job", json={"enabled": True})
-        body = show(f"ENABLE forecast job — {label}", r)
-        r.raise_for_status()
-        job_id = body["job_id"]
-        r = admin.put(f"/db/forecast_jobs/{job_id}", json={"horizon": 6})
-        show(f"SET HORIZON=3h (admin DB endpoint) — {label}", r)
+    r = admin.patch(f"/forecaster/pilot/{pilot1_id}/forecast_job", json={"enabled": True})
+    body = show("ENABLE forecast job — Pilot-Admin-1", r)
+    r.raise_for_status()
+    job_id = body["job_id"]
+    r = admin.put(f"/db/forecast_jobs/{job_id}", json={"horizon": 6, "predict_periodicity_minutes": 1})
+    show("SET HORIZON=h + PERIODICITY=1min (admin DB endpoint) — Pilot-Admin-1", r)
 
     # ── 6c. CDF + EV forecast stats BEFORE import ────────────────────────────
     section("STEP 6c — CDF + EV FORECAST STATS  (before CSV import)")
@@ -373,6 +440,7 @@ def main(skip_history: bool = False) -> None:
 
     # Start 3 hours before now so the sessions are already visible to the
     # aggregated forecaster (which queries active sessions at current wall time).
+    # Sent in UTC intentionally — verifies the service handles UTC input correctly.
     T0 = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(hours=3)
     cA = chargers_p1[0]
     cB = chargers_p1[1]
@@ -415,6 +483,9 @@ def main(skip_history: bool = False) -> None:
 
     # ── 11. Both sessions updated every 15 min for 2 hours ───────────────────
     section("STEP 11 — CHARGING UPDATES BOTH SESSIONS  (n steps every 15 min)")
+    # Switch to pilot1 timezone from here on — all subsequent event timestamps
+    # use Europe/Zurich offsets to verify the service handles non-UTC input.
+    T43 = T43.astimezone(pilot1_tz)
     t_live = T43
     for step in range(1, 5):
         t_live = T43 + timedelta(minutes=step * 15)
@@ -424,7 +495,7 @@ def main(skip_history: bool = False) -> None:
                 "avg_power_last_15min_kw": pwr, "energy_delivered_kwh": nrg,
                 "is_fully_charged": False,
             })
-        print(f"  step {step}/5  t={t_live.strftime('%H:%M UTC')}")
+        print(f"  step {step}/5  t={t_live.strftime('%H:%M %Z')}")
 
     # ── 12–13. Active sessions & forecast ────────────────────────────────────
     section("STEP 12 — CHECK ACTIVE SESSIONS")
@@ -531,8 +602,8 @@ def main(skip_history: bool = False) -> None:
     r.raise_for_status()
     job_id_p3 = body["job_id"]
     admin2 = Client().login(ADMIN_USER, ADMIN_PASSWORD)
-    r = admin2.put(f"/db/forecast_jobs/{job_id_p3}", json={"horizon": 6})
-    show("SET HORIZON=3h (admin DB endpoint) — Pilot-UserAdv-3", r)
+    r = admin2.put(f"/db/forecast_jobs/{job_id_p3}", json={"horizon": 6, "predict_periodicity_minutes": 1})
+    show("SET HORIZON=h + PERIODICITY=1min (admin DB endpoint) — Pilot-UserAdv-3", r)
     admin2.logout()
 
     # ── 30. Change password ───────────────────────────────────────────────────
@@ -549,7 +620,7 @@ def main(skip_history: bool = False) -> None:
 
     # ── 33. Create 2 sessions on user-adv pilot ───────────────────────────────
     section("STEP 33 — CREATE 2 CHARGING SESSIONS  (user-adv, Pilot-UserAdv-3)")
-    T_uadv = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    T_uadv = datetime.now(pilot3_tz).replace(second=0, microsecond=0) - timedelta(minutes=50)
     cP3A = chargers_p3[0]
     cP3B = chargers_p3[1]
 
@@ -604,7 +675,7 @@ def main(skip_history: bool = False) -> None:
                 "avg_power_last_15min_kw": pwr, "energy_delivered_kwh": nrg,
                 "is_fully_charged": False,
             })
-        print(f"  step {step}/3  t={t_uadv_live.strftime('%H:%M UTC')}")
+        print(f"  step {step}/3  t={t_uadv_live.strftime('%H:%M %Z')}")
 
     section("STEP 39 — CHECK ACTIVE SESSIONS (user-adv)")
     active_sessions(uadv, "after 45-min updates")
@@ -645,7 +716,7 @@ def main(skip_history: bool = False) -> None:
             "avg_power_last_15min_kw": 7.0, "energy_delivered_kwh": 1.75,
             "is_fully_charged": False,
         })
-        print(f"  step {step}/2  t={t_uadv_live2.strftime('%H:%M UTC')}")
+        print(f"  step {step}/2  t={t_uadv_live2.strftime('%H:%M %Z')}")
 
     section("STEP 46 — CHECK ACTIVE SESSIONS (user-adv)")
     active_sessions(uadv, "P3-C02 still active")
@@ -673,7 +744,7 @@ def main(skip_history: bool = False) -> None:
     section("STEP 51 — TRY CREATE SESSION ON USER-ADV PILOT (guest — expect 403)")
     r = guest.post("/events/vehicle_connected", json={
         "charger_id": cP3B,
-        "timestamp": _ts(datetime.now(timezone.utc)),
+        "timestamp": _ts(datetime.now(pilot3_tz)),
         "measured_power_kw": 7.0,
         "is_fully_charged": False,
     })
@@ -700,7 +771,7 @@ def main(skip_history: bool = False) -> None:
 
     # ── 55. Disconnect remaining vehicle ──────────────────────────────────────
     section("STEP 55 — DISCONNECT REMAINING VEHICLE (P3-C02)")
-    T_final = datetime.now(timezone.utc)
+    T_final = datetime.now(pilot3_tz)
     r = uadv2.post("/events/vehicle_disconnected", json={
         "charger_id": cP3B, "timestamp": _ts(T_final),
         "avg_power_last_15min_kw": 0.3, "energy_delivered_kwh": 0.2,
@@ -718,11 +789,28 @@ def main(skip_history: bool = False) -> None:
     section("STEP 58 — LOGOUT USER-ADV")
     uadv2.logout()
 
+    # ── 59. 404 probes ────────────────────────────────────────────────────────
+    section("STEP 59 — 404 PROBES  (non-existent resource IDs)")
+    _probe_id = str(uuid.uuid4())
+    admin_probe = Client().login(ADMIN_USER, ADMIN_PASSWORD)
+
+    r = admin_probe.get(f"/db/chargers/{_probe_id}")
+    show("GET /db/chargers/{random_uuid} — expect 404", r)
+
+    r = admin_probe.get(f"/db/pilots/{_probe_id}")
+    show("GET /db/pilots/{random_uuid} — expect 404", r)
+
+    r = admin_probe.get(f"/sessions/actions/session/{_probe_id}")
+    show("GET /sessions/actions/session/{random_uuid} — expect 404", r)
+
+    admin_probe.logout()
+
     # ── Summary ───────────────────────────────────────────────────────────────
     section("ALL STEPS COMPLETE")
     print("""
   Key things to verify in the output:
   ─────────────────────────────────────────────────────────────────────
+  ✓ Step 0         signup creates guest user (201), duplicate returns 400/409, login works
   ✓ Steps 2–5      owners / pilots / chargers created (201 responses)
   ✓ Step 6b        admin lists + enables forecast jobs for pilots 1 & 2 (after history)
   ✓ Step 8         sessions A & B created; A has 2 updates before B connects
@@ -733,6 +821,7 @@ def main(skip_history: bool = False) -> None:
   ✓ Step 53        user-adv can log in with new password  test_user
   ✓ Steps 26,42    /forecaster/charger/{id}/latest returns per-hour stats
   ✓ Step 27        /forecaster/charger/{id}/history returns all historical rows
+  ✓ Step 59        /db/chargers, /db/pilots, /sessions/actions/session all return 404 for unknown UUIDs
 
   Note on pilot forecasts (steps 7, 10, 13, 16, 19, 22, 25, 32, 35, 40, 44, 47, 57):
     These return [] until Celery beat has picked up the enabled ForecastJobDB entries

@@ -1,8 +1,9 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +12,8 @@ from app.models import Actions, GridLoadForecasted
 from app.services.orchestrator.observation_builder import prepare_observation
 from app.services.orchestrator.duration_cdf.query import get_cumulative_duration_probability
 from app.services.orchestrator.disconnection_probability import get_disconnection_prob
-from app.services.orchestrator.constants import OBSERVATION_SIZE
+from app.services.orchestrator.constants import OBSERVATION_SIZE, FORECAST_STEP_MINUTES
+
 from app.services.orchestrator.policy.policy_loader import get_policy
 from app.config import ACTOR_MODEL_PATH
 
@@ -31,6 +33,7 @@ def compute_and_save_action(
         time_connection: datetime,
         forecasted_energy_kwh_std: float,
         forecasted_duration_hours_std: float,
+        forecast_timestamps: Optional[List[datetime]] = None,
 ) -> Dict:
     """
     Computes the charging action and saves it to the database.
@@ -109,10 +112,16 @@ def compute_and_save_action(
 
     # Persist load forecast
     # -----------------------------
-    for value in community_load_kw:
+    # Zip values with their pre-computed timestamps.  When no timestamp vector
+    # was supplied (e.g. tests), generate one on the spot as a safe fallback.
+    if forecast_timestamps is None:
+        step = timedelta(minutes=FORECAST_STEP_MINUTES)
+        forecast_timestamps = [ts_utc + i * step for i in range(len(community_load_kw))]
+    for value, ts in zip(community_load_kw, forecast_timestamps):
         forecast_row = GridLoadForecasted(
             id=uuid4(),
             value=value,
+            forecast_timestamp=ts,
             id_action=action_id,
         )
         db.add(forecast_row)

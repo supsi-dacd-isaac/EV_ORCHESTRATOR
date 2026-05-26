@@ -87,7 +87,11 @@ def vehicle_connected(
         )
 
         # 2. Call load forecaster
-        community_load_kw = forecast_load()
+        community_load_kw, forecast_timestamps = forecast_load(
+            db=db,
+            pilot_id=pilot.id if pilot else None,
+            event_time=event.timestamp,
+        )
 
         if existing_session:
             # Active session found: compute action based on existing session and send warning
@@ -111,6 +115,7 @@ def vehicle_connected(
                 time_connection=existing_session.start_time,
                 forecasted_energy_kwh_std=existing_session.forecasted_energy_kwh_std,
                 forecasted_duration_hours_std=existing_session.forecasted_duration_hours_std,
+                forecast_timestamps=forecast_timestamps,
             )
             db.commit()
 
@@ -163,6 +168,7 @@ def vehicle_connected(
             time_connection=new_session.start_time,
             forecasted_energy_kwh_std=new_session.forecasted_energy_kwh_std,
             forecasted_duration_hours_std=new_session.forecasted_duration_hours_std,
+            forecast_timestamps=forecast_timestamps,
         )
         db.commit()
 
@@ -222,7 +228,11 @@ def charging_update(
             session.end_charging_time = to_utc(event.timestamp)
 
         # 3. Call load forecaster
-        community_load_kw = forecast_load()
+        community_load_kw, forecast_timestamps = forecast_load(
+            db=db,
+            pilot_id=pilot.id if pilot else None,
+            event_time=event.timestamp,
+        )
 
         # 4. Call orchestrator
         action = compute_and_save_action(
@@ -240,6 +250,7 @@ def charging_update(
             time_connection = session.start_time,
             forecasted_energy_kwh_std = session.forecasted_energy_kwh_std,
             forecasted_duration_hours_std = session.forecasted_duration_hours_std,
+            forecast_timestamps=forecast_timestamps,
         )
 
         db.commit()

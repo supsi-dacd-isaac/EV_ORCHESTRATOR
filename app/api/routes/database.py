@@ -329,7 +329,7 @@ def delete_session(session_id: UUID, current_user: TokenData = Depends(get_curre
 
 
 # ---------- Pilot ----------
-@router.post("/pilots", response_model=PilotRead)
+@router.post("/pilots")
 def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
@@ -342,6 +342,8 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
             name=payload.name,
             id_owner=payload.id_owner,
             timezone_name=payload.timezone_name,
+            forecast_meter=payload.forecast_meter,
+            forecast_site=payload.forecast_site,
         )
         db.add(obj)
         db.flush()  # get obj.id before creating the job
@@ -352,7 +354,7 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
             job_id=f"pilot_{obj.id}_forecast",
             id_pilot=obj.id,
             enabled=False,
-            predict_periodicity_minutes=1,
+            predict_periodicity_minutes=15,
             artifact_path=f"{obj.id}_model.pkl",
             kind="sim",
             freq="15min", #used by reg
@@ -367,7 +369,18 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
         db.add(default_job)
         db.commit()
         db.refresh(obj)
-        return obj
+
+        result = PilotRead.model_validate(obj).model_dump()
+
+        missing = [f for f in ("forecast_meter", "forecast_site") if not getattr(payload, f)]
+        if missing:
+            result["warning"] = (
+                f"Pilot created without {' and '.join(missing)}. "
+                "Load forecast will fall back to a constant value — "
+                "this does not allow any control that helps prevent grid congestion."
+            )
+
+        return result
     finally:
         db.close()
 
@@ -727,6 +740,7 @@ def create_grid_load_forecasted(
         obj = GridLoadForecasted(
             id=uuid4(),
             value=payload.value,
+            forecast_timestamp=payload.forecast_timestamp,
             id_action=payload.id_action,
         )
         db.add(obj)

@@ -90,16 +90,19 @@ class ChargingSessionsRead(BaseModel):
 
 class GridLoadForecastedCreate(BaseModel):
     value: float
+    forecast_timestamp: datetime
     id_action: Optional[UUID] = None
 
 class GridLoadForecastedUpdate(BaseModel):
     id: Optional[UUID] = None
     value: Optional[float] = None
+    forecast_timestamp: Optional[datetime] = None
     id_action: Optional[UUID] = None
 
 class GridLoadForecastedRead(BaseModel):
     id: UUID
     value: float
+    forecast_timestamp: datetime
     id_action: Optional[UUID]
     model_config = ConfigDict(from_attributes=True)
 
@@ -159,18 +162,24 @@ class PilotCreate(BaseModel):
     name: str
     id_owner: UUID
     timezone_name: str = "Europe/Zurich"
+    forecast_meter: Optional[str] = None
+    forecast_site: Optional[str] = None
 
 class PilotUpdate(BaseModel):
     id: Optional[UUID] = None
     name: Optional[str] = None
     id_owner: Optional[UUID] = None
     timezone_name: Optional[str] = None
+    forecast_meter: Optional[str] = None
+    forecast_site: Optional[str] = None
 
 class PilotRead(BaseModel):
     id: UUID
     name: str
     id_owner: UUID
     timezone_name: str
+    forecast_meter: Optional[str]
+    forecast_site: Optional[str]
     model_config = ConfigDict(from_attributes=True)
 
 class EvForecastStatsCreate(BaseModel):
@@ -259,7 +268,7 @@ class ForecastJobCreate(BaseModel):
     job_id: str
     id_pilot: UUID
     enabled: bool = False
-    predict_periodicity_minutes: int = 1
+    predict_periodicity_minutes: int = 15
     artifact_path: str
     kind: str = "reg"
     freq: str = "15min"

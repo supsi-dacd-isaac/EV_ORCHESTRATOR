@@ -55,3 +55,4 @@ pandas==2.2.3
 redis==5.2.1
 celery-redbeat==2.2.0
 tqdm==4.67.1
+requests==2.32.3

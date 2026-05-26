@@ -65,3 +65,10 @@ FORECAST_ARTIFACT_MAX_AGE_DAYS: int = int(_max_age_raw) if _max_age_raw.strip() 
 CSV_IMPORT_MAX_BYTES = int(os.getenv("CSV_IMPORT_MAX_BYTES", str(52_428)))
 # Maximum number of rows processed per import call
 CSV_IMPORT_MAX_ROWS = int(os.getenv("CSV_IMPORT_MAX_ROWS", "200"))
+
+# ---------------------------------------------------------------------------
+# Base-load forecast (external API)
+# ---------------------------------------------------------------------------
+# When set, forecast_load() calls this URL via HTTP POST instead of using the
+# built-in static fallback value.
+BASE_LOAD_FORECAST_API_URL = os.getenv("BASE_LOAD_FORECAST_API_URL", "")

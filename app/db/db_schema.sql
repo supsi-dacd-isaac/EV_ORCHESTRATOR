@@ -147,7 +147,8 @@ ALTER TABLE public.ev_forecast_stats OWNER TO postgres;
 CREATE TABLE public.grid_load_forecasted (
     id uuid NOT NULL,
     id_action uuid,
-    value double precision NOT NULL
+    value double precision NOT NULL,
+    forecast_timestamp timestamp with time zone NOT NULL
 );
 
 
@@ -179,7 +180,9 @@ CREATE TABLE public.pilot (
     id uuid NOT NULL,
     name character varying NOT NULL,
     id_owner uuid NOT NULL,
-    timezone_name character varying NOT NULL DEFAULT 'Europe/Zurich'
+    timezone_name character varying NOT NULL DEFAULT 'Europe/Zurich',
+    forecast_meter character varying,
+    forecast_site character varying
 );
 
 
