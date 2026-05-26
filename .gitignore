@@ -17,3 +17,8 @@ Thumbs.db
 
 # Local-only debug helper
 app/run_debug.py
+
+# Deployment package (large Docker image tar — not tracked in git)
+ev_orchestrator_deployment/
+ev_orchestrator_deployment.7z
+docker-compose-deployment.yml
