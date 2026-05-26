@@ -34,6 +34,7 @@ scheduler_app.conf.update(
             "schedule": crontab(minute="*/1"),
         },
     },
+    beat_max_loop_interval=60,
     beat_scheduler="redbeat.RedBeatScheduler",
     redbeat_redis_url=REDBEAT_REDIS_URL,
     redbeat_lock_key="redbeat::lock",

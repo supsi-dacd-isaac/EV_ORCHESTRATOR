@@ -468,8 +468,10 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
 
     cutoff = _sessions_end_after_cutoff_for_prediction(model, db, job.id_pilot)
     df = charging_sessions_to_forecast_df(db, job.id_pilot, end_time_after=cutoff)
+    used_full_history = False
     if df.empty:
         df = charging_sessions_to_forecast_df(db, job.id_pilot)
+        used_full_history = True
         logger.info(
             "No sessions after prediction cutoff %s; using full pilot history (%s rows)",
             cutoff,
@@ -487,6 +489,19 @@ def run_forecast_job(db: Session, job: ForecastJob) -> dict:
         return {**out_base, "status": "skipped", "reason": "no_completed_sessions", "rows": 0}
 
     X, _, _ = model.format(df=df, inference=True)
+    if X.empty and not used_full_history:
+        # The cutoff window is too short for the lag features (e.g. a single recent
+        # session only spans a few bins). Retry with the full session history.
+        df_full = charging_sessions_to_forecast_df(db, job.id_pilot)
+        if len(df_full) > len(df):
+            logger.info(
+                "Cutoff window insufficient for feature matrix (%s rows); "
+                "retrying with full history (%s rows)",
+                len(df),
+                len(df_full),
+            )
+            df = df_full
+            X, _, _ = model.format(df=df, inference=True)
     if X.empty:
         return {**out_base, "status": "skipped", "reason": "format_yielded_no_rows", "rows": 0}
 
