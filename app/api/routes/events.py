@@ -10,7 +10,7 @@ from app.models import Chargers, ChargingSessions, Actions, Pilot, Owners
 
 from app.services.ev_forecast.query import get_ev_forecast
 from app.services.load_forecast.load_forecaster_service import forecast_load
-from app.services.orchestrator.orchestrator_service import compute_and_save_action
+from app.services.orchestrator.orchestrator_service import compute_and_save_action, finalize_session_action
 from app.services.ev_forecast.updater import update_ev_forecast
 from app.services.orchestrator.duration_cdf.updater import update_ev_duration_cdf
 from app.services.common.db_utils import to_utc, to_response_tz, get_pilot_tz_for_charger
@@ -133,9 +133,10 @@ def vehicle_connected(
         )
 
         # create DB charging session (initial placeholders for end times and duration)
+        pilot_tz_name = pilot.timezone_name if pilot else "UTC"
         new_session = ChargingSessions(
             id=uuid4(),
-            start_time=to_utc(event.timestamp),
+            start_time=to_utc(event.timestamp, local_tz=pilot_tz_name),
             # end_time=event.timestamp,
             # end_charging_time=event.timestamp,
             # duration=0.0,
@@ -221,11 +222,12 @@ def charging_update(
             pilot = db.query(Pilot).filter(Pilot.id == charger.id_pilot).first()
 
         # 2. Update session dynamic state
+        pilot_tz_name = pilot.timezone_name if pilot else "UTC"
         session.energy_delivered_kwh += event.energy_delivered_kwh
         # session.avg_measured_power_kw = event.avg_power_last_15min_kw
         session.is_fully_charged = event.is_fully_charged
         if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
-            session.end_charging_time = to_utc(event.timestamp)
+            session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
 
         # 3. Call load forecaster
         community_load_kw, forecast_timestamps = forecast_load(
@@ -295,15 +297,24 @@ def vehicle_disconnected(
         )
 
         # 2. Update session final state
+        pilot_tz_name = get_pilot_tz_for_charger(db, str(session.id_charger))
         session.energy_delivered_kwh = session.energy_delivered_kwh + event.energy_delivered_kwh
         if session.end_charging_time is None:
-            session.end_charging_time = to_utc(event.timestamp)
-        session.end_time = to_utc(event.timestamp)
+            session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
+        session.end_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
         session.duration = (session.end_time - session.start_time).total_seconds() / 3600
         session.active = False
 
         # persist changes (but don't commit yet)
         db.flush()
+
+        # Fill real_action/real_power_kw on the last action row for this session.
+        finalize_session_action(
+            db=db,
+            session_id=session.id,
+            final_energy_kwh=session.energy_delivered_kwh,
+            disconnection_time=to_utc(event.timestamp, local_tz=pilot_tz_name),
+        )
 
         caller_tz = event.timestamp.tzinfo if event.timestamp.tzinfo is not None else None
         # When caller did not supply a timezone, fall back to the pilot's local timezone

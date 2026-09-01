@@ -10,7 +10,7 @@ from app.db.session import SessionLocal
 from app.models import ChargingSessions
 
 
-def to_utc(value: datetime) -> datetime:
+def to_utc(value: datetime, local_tz: Union[str, None] = None) -> datetime:
     """
     Normalise *value* to a UTC-aware datetime for storing in a
     ``TIMESTAMP WITH TIME ZONE`` column.
@@ -18,8 +18,10 @@ def to_utc(value: datetime) -> datetime:
     Convention used throughout this repo:
     - DB columns  : TIMESTAMP WITH TIME ZONE → stores UTC, returns UTC-aware.
     - API inputs  : FastAPI/Pydantic accepts any tz-aware ISO-8601 string
-                    (e.g. "2026-05-11T15:00:00+02:00") or a naive string
-                    (treated as UTC). Always call to_utc() before writing.
+                    (e.g. "2026-05-11T15:00:00+02:00"). A naive string (no
+                    offset) is interpreted as wall-clock time in *local_tz*
+                    (the charger's pilot timezone) when provided, otherwise
+                    as UTC. Always call to_utc() before writing.
     - API outputs : UTC-aware ISO-8601 with "+00:00" suffix, e.g.
                     "2026-05-11T13:00:00+00:00". Clients must interpret as UTC.
     - Internal    : datetime objects with tzinfo=timezone.utc.
@@ -28,13 +30,20 @@ def to_utc(value: datetime) -> datetime:
     --------
     to_utc(datetime(2026,5,11,15,0, tzinfo=ZoneInfo("Europe/Zurich")))
         → datetime(2026,5,11,13,0, tzinfo=timezone.utc)   # +02:00 → UTC
+    to_utc(datetime(2026,5,11,15,0), local_tz="Europe/Zurich")
+        → datetime(2026,5,11,13,0, tzinfo=timezone.utc)   # naive → assumed pilot-local
     to_utc(datetime(2026,5,11,13,0))
-        → datetime(2026,5,11,13,0, tzinfo=timezone.utc)   # naive → assumed UTC
+        → datetime(2026,5,11,13,0, tzinfo=timezone.utc)   # naive, no local_tz → assumed UTC
     """
     if value is None:
         return value
     if value.tzinfo is None:
-        # Naive input: assume it is already UTC wall time
+        if local_tz:
+            try:
+                return value.replace(tzinfo=ZoneInfo(local_tz)).astimezone(timezone.utc)
+            except (ZoneInfoNotFoundError, KeyError):
+                pass  # unknown tz name → fall back to UTC assumption below
+        # No local_tz context available: assume it is already UTC wall time
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
@@ -79,17 +88,17 @@ def to_response_tz(
 def get_pilot_tz_for_charger(db: Session, charger_id: str) -> str:
     """
     Resolve charger → pilot → timezone_name.
-    Returns 'Europe/Zurich' as default when the charger has no pilot or
+    Returns 'UTC' as default when the charger has no pilot or
     the pilot has no timezone set.
     """
     from app.models import Chargers, Pilot  # local import to avoid circular deps
     charger = db.query(Chargers).filter(Chargers.id == charger_id).first()
     if charger is None or charger.id_pilot is None:
-        return "Europe/Zurich"
+        return "UTC"
     pilot = db.query(Pilot).filter(Pilot.id == charger.id_pilot).first()
     if pilot is None:
-        return "Europe/Zurich"
-    return pilot.timezone_name or "Europe/Zurich"
+        return "UTC"
+    return pilot.timezone_name or "UTC"
 
 
 def to_pilot_time(dt_utc: datetime, tz_name: str) -> datetime:
