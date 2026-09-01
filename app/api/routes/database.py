@@ -151,6 +151,8 @@ def create_charger(payload: ChargersCreate, current_user: TokenData = Depends(ge
             plugs=payload.plugs,
             id_owner=payload.id_owner,
             id_pilot=payload.id_pilot,
+            control_algorithm=payload.control_algorithm,
+            control_policy=payload.control_policy,
         )
         db.add(obj)
         db.commit()
@@ -344,6 +346,7 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
             timezone_name=payload.timezone_name,
             forecast_meter=payload.forecast_meter,
             forecast_site=payload.forecast_site,
+            policy_signals=payload.policy_signals,
         )
         db.add(obj)
         db.flush()  # get obj.id before creating the job
@@ -473,8 +476,15 @@ def create_action(payload: ActionsCreate, current_user: TokenData = Depends(get_
             is_fully_charged=payload.is_fully_charged,
             probability_disconnection=payload.probability_disconnection,
             cumulative_duration_probability=payload.cumulative_duration_probability,
-            action=payload.action,
+            suggested_action=payload.suggested_action,
             id_cs=payload.id_cs,
+            control_policy=payload.control_policy,
+            control_algorithm=payload.control_algorithm,
+            correction_applied=payload.correction_applied,
+            suggested_power_kw=payload.suggested_power_kw,
+            real_action=payload.real_action,
+            real_power_kw=payload.real_power_kw,
+            decision_context=payload.decision_context,
         )
         db.add(obj)
         db.commit()

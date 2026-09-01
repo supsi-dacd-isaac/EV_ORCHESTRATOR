@@ -3,6 +3,7 @@ import datetime
 import uuid
 
 from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, String, UniqueConstraint, Uuid, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -43,6 +44,9 @@ class Pilot(Base):
     timezone_name: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'Europe/Zurich'"))
     forecast_meter: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     forecast_site: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # How/where to query policy-specific external signals (e.g. wind_excess).
+    # Live per-timestep values are stored on actions.decision_context, not here.
+    policy_signals: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
@@ -70,6 +74,8 @@ class Chargers(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
     id_owner: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
     id_pilot: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    control_algorithm: Mapped[Optional[str]] = mapped_column(String)
+    control_policy: Mapped[Optional[str]] = mapped_column(String)
 
     owners: Mapped[Optional['Owners']] = relationship('Owners', back_populates='chargers')
     pilot: Mapped[Optional['Pilot']] = relationship('Pilot', back_populates='chargers')
@@ -156,9 +162,17 @@ class Actions(Base):
     is_fully_charged: Mapped[bool] = mapped_column(Boolean, nullable=False)
     probability_disconnection: Mapped[float] = mapped_column(Double(53), nullable=False)
     cumulative_duration_probability: Mapped[float] = mapped_column(Double(53), nullable=False)
-    action: Mapped[str] = mapped_column(String, nullable=False)
+    suggested_action: Mapped[str] = mapped_column(String, nullable=False)
     id_cs: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
-    policy: Mapped[Optional[str]] = mapped_column(String)
+    control_policy: Mapped[Optional[str]] = mapped_column(String)
+    control_algorithm: Mapped[Optional[str]] = mapped_column(String)
+    correction_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    suggested_power_kw: Mapped[Optional[float]] = mapped_column(Double(53))
+    real_action: Mapped[Optional[str]] = mapped_column(String)
+    real_power_kw: Mapped[Optional[float]] = mapped_column(Double(53))
+    # Policy-variable inputs for debugging (e.g. wind_excess_kw). Shape is
+    # application-defined; v1 stores {"inputs": { ... policy_context ... }}.
+    decision_context: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     charging_sessions: Mapped[Optional['ChargingSessions']] = relationship('ChargingSessions', back_populates='actions')
     grid_load_forecasted: Mapped[list['GridLoadForecasted']] = relationship('GridLoadForecasted', back_populates='actions')

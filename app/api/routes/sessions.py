@@ -505,9 +505,15 @@ def list_actions_by_session(
                 "is_fully_charged": a.is_fully_charged,
                 "probability_disconnection": a.probability_disconnection,
                 "cumulative_duration_probability": a.cumulative_duration_probability,
-                "action": a.action,
+                "suggested_action": a.suggested_action,
                 "id_cs": a.id_cs,
-                "policy": a.policy,
+                "control_policy": a.control_policy,
+                "control_algorithm": a.control_algorithm,
+                "correction_applied": a.correction_applied,
+                "suggested_power_kw": a.suggested_power_kw,
+                "real_action": a.real_action,
+                "real_power_kw": a.real_power_kw,
+                "decision_context": a.decision_context,
             }
             for a in actions
         ]

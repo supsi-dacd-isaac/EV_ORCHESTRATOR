@@ -52,8 +52,14 @@ CREATE TABLE public.actions (
     is_fully_charged boolean NOT NULL,
     probability_disconnection double precision NOT NULL,
     cumulative_duration_probability double precision NOT NULL,
-    action character varying NOT NULL,
-    policy character varying
+    suggested_action character varying NOT NULL,
+    control_policy character varying,
+    control_algorithm character varying,
+    correction_applied boolean DEFAULT false NOT NULL,
+    suggested_power_kw double precision,
+    real_action character varying,
+    real_power_kw double precision,
+    decision_context jsonb
 );
 
 
@@ -73,7 +79,9 @@ CREATE TABLE public.chargers (
     nominal_power double precision NOT NULL,
     plugs character varying NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    id_pilot uuid
+    id_pilot uuid,
+    control_algorithm character varying,
+    control_policy character varying
 );
 
 
@@ -182,7 +190,8 @@ CREATE TABLE public.pilot (
     id_owner uuid NOT NULL,
     timezone_name character varying NOT NULL DEFAULT 'Europe/Zurich',
     forecast_meter character varying,
-    forecast_site character varying
+    forecast_site character varying,
+    policy_signals jsonb
 );
 
 
@@ -407,6 +416,63 @@ ALTER TABLE ONLY public.ev_pilot_forecast_timeseries
 --
 
 CREATE INDEX ev_pilot_forecast_ts_pilot_run_idx ON public.ev_pilot_forecast_timeseries USING btree (id_pilot, run_at DESC);
+
+
+--
+-- Name: forecast_jobs; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.forecast_jobs (
+    id uuid NOT NULL,
+    job_id character varying NOT NULL,
+    id_pilot uuid NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    predict_periodicity_minutes integer DEFAULT 60 NOT NULL,
+    artifact_path character varying NOT NULL,
+    kind character varying DEFAULT 'reg'::character varying NOT NULL,
+    freq character varying DEFAULT '1h'::character varying NOT NULL,
+    timezone character varying DEFAULT 'UTC'::character varying NOT NULL,
+    horizon integer,
+    sim_steps integer DEFAULT 24 NOT NULL,
+    sim_dt_hours double precision DEFAULT 1.0 NOT NULL,
+    sim_power_kw double precision DEFAULT 11.0 NOT NULL,
+    cal_fraction double precision DEFAULT 0.2 NOT NULL,
+    lags json,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.forecast_jobs OWNER TO postgres;
+
+--
+-- Name: forecast_jobs forecast_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.forecast_jobs
+    ADD CONSTRAINT forecast_jobs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: forecast_jobs forecast_jobs_job_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.forecast_jobs
+    ADD CONSTRAINT forecast_jobs_job_id_key UNIQUE (job_id);
+
+
+--
+-- Name: forecast_jobs forecast_jobs_pilot_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.forecast_jobs
+    ADD CONSTRAINT forecast_jobs_pilot_fkey FOREIGN KEY (id_pilot) REFERENCES public.pilot(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- Name: forecast_jobs set_updated_at; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.forecast_jobs FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 --

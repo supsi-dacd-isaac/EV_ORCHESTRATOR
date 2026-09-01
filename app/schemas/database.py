@@ -15,6 +15,8 @@ class ChargersCreate(BaseModel):
     plugs: str
     id_owner: Optional[UUID] = None
     id_pilot: Optional[UUID] = None
+    control_algorithm: Optional[str] = None
+    control_policy: Optional[str] = None
 
 class ChargersUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -27,6 +29,8 @@ class ChargersUpdate(BaseModel):
     updated_at: Optional[datetime] = None
     id_owner: Optional[UUID] = None
     id_pilot: Optional[UUID] = None
+    control_algorithm: Optional[str] = None
+    control_policy: Optional[str] = None
 
 class ChargersRead(BaseModel):
     id: UUID
@@ -39,6 +43,8 @@ class ChargersRead(BaseModel):
     updated_at: datetime
     id_owner: Optional[UUID]
     id_pilot: Optional[UUID]
+    control_algorithm: Optional[str] = None
+    control_policy: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 class ChargingSessionsCreate(BaseModel):
@@ -164,6 +170,7 @@ class PilotCreate(BaseModel):
     timezone_name: str = "Europe/Zurich"
     forecast_meter: Optional[str] = None
     forecast_site: Optional[str] = None
+    policy_signals: Optional[dict[str, Any]] = None
 
 class PilotUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -172,6 +179,7 @@ class PilotUpdate(BaseModel):
     timezone_name: Optional[str] = None
     forecast_meter: Optional[str] = None
     forecast_site: Optional[str] = None
+    policy_signals: Optional[dict[str, Any]] = None
 
 class PilotRead(BaseModel):
     id: UUID
@@ -180,6 +188,7 @@ class PilotRead(BaseModel):
     timezone_name: str
     forecast_meter: Optional[str]
     forecast_site: Optional[str]
+    policy_signals: Optional[dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 
 class EvForecastStatsCreate(BaseModel):
@@ -221,9 +230,15 @@ class ActionsCreate(BaseModel):
     is_fully_charged: bool
     probability_disconnection: float
     cumulative_duration_probability: float
-    action: str
+    suggested_action: str
     id_cs: Optional[UUID] = None
-    policy: Optional[str] = None
+    control_policy: Optional[str] = None
+    control_algorithm: Optional[str] = None
+    correction_applied: bool = False
+    suggested_power_kw: Optional[float] = None
+    real_action: Optional[str] = None
+    real_power_kw: Optional[float] = None
+    decision_context: Optional[dict[str, Any]] = None
 
 class ActionsUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -233,9 +248,15 @@ class ActionsUpdate(BaseModel):
     is_fully_charged: Optional[bool] = None
     probability_disconnection: Optional[float] = None
     cumulative_duration_probability: Optional[float] = None
-    action: Optional[str] = None
+    suggested_action: Optional[str] = None
     id_cs: Optional[UUID] = None
-    policy: Optional[str] = None
+    control_policy: Optional[str] = None
+    control_algorithm: Optional[str] = None
+    correction_applied: Optional[bool] = None
+    suggested_power_kw: Optional[float] = None
+    real_action: Optional[str] = None
+    real_power_kw: Optional[float] = None
+    decision_context: Optional[dict[str, Any]] = None
 
 class ActionsRead(BaseModel):
     id: UUID
@@ -245,9 +266,15 @@ class ActionsRead(BaseModel):
     is_fully_charged: bool
     probability_disconnection: float
     cumulative_duration_probability: float
-    action: str
+    suggested_action: str
     id_cs: Optional[UUID]
-    policy: Optional[str]
+    control_policy: Optional[str] = None
+    control_algorithm: Optional[str] = None
+    correction_applied: bool = False
+    suggested_power_kw: Optional[float] = None
+    real_action: Optional[str] = None
+    real_power_kw: Optional[float] = None
+    decision_context: Optional[dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 
 
