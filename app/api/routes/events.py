@@ -14,6 +14,7 @@ from app.services.orchestrator.orchestrator_service import compute_and_save_acti
 from app.services.ev_forecast.updater import update_ev_forecast
 from app.services.orchestrator.duration_cdf.updater import update_ev_duration_cdf
 from app.services.common.db_utils import to_utc, to_response_tz, get_pilot_tz_for_charger
+from app.services.common.error_log import log_system_error
 from app.services.common.auth import TokenData, get_current_user
 from app.services.common.authorization import (
     ensure_charger_access,
@@ -100,24 +101,46 @@ def vehicle_connected(
             energy_delivered_kwh = existing_session.energy_delivered_kwh
             is_fully_charged = event.is_fully_charged
 
-            action = compute_and_save_action(
-                db=db,
-                session_id=existing_session.id,
-                charger_id=event.charger_id,
-                timestamp=event.timestamp,
-                current_power_kw=current_power_kw,
-                forecasted_energy_kwh=existing_session.forecasted_energy_kwh,
-                forecasted_duration_hours=existing_session.forecasted_duration_hours,
-                energy_delivered_kwh=energy_delivered_kwh,
-                community_load_kw=community_load_kw,
-                is_fully_charged=is_fully_charged,
-                controlled_charging_points=existing_session.controlled_charging_points,
-                time_connection=existing_session.start_time,
-                forecasted_energy_kwh_std=existing_session.forecasted_energy_kwh_std,
-                forecasted_duration_hours_std=existing_session.forecasted_duration_hours_std,
-                forecast_timestamps=forecast_timestamps,
-            )
-            db.commit()
+            # Policy failures are handled inside compute_and_save_action (fallback /
+            # suggested_action=NULL). This try/except is only a last resort for
+            # unexpected errors (e.g. DB write failure) so the existing session is kept.
+            try:
+                action = compute_and_save_action(
+                    db=db,
+                    session_id=existing_session.id,
+                    charger_id=event.charger_id,
+                    timestamp=event.timestamp,
+                    current_power_kw=current_power_kw,
+                    forecasted_energy_kwh=existing_session.forecasted_energy_kwh,
+                    forecasted_duration_hours=existing_session.forecasted_duration_hours,
+                    energy_delivered_kwh=energy_delivered_kwh,
+                    community_load_kw=community_load_kw,
+                    is_fully_charged=is_fully_charged,
+                    controlled_charging_points=existing_session.controlled_charging_points,
+                    time_connection=existing_session.start_time,
+                    forecasted_energy_kwh_std=existing_session.forecasted_energy_kwh_std,
+                    forecasted_duration_hours_std=existing_session.forecasted_duration_hours_std,
+                    forecast_timestamps=forecast_timestamps,
+                )
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                log_system_error(
+                    db,
+                    source="vehicle_connected.compute_and_save_action",
+                    error=exc,
+                    charger_id=charger.id,
+                    session_id=existing_session.id,
+                )
+                db.commit()
+                return {
+                    "warning": (
+                        f"Session already active ({existing_session.id}) for this charger. "
+                        f"Unexpected failure while persisting a decision: {exc}."
+                    ),
+                    "session_id": str(existing_session.id),
+                    "action": None,
+                }
 
             return {
                 "warning": f"Session already active ({existing_session.id}) for this charger. Please check and use charging_update endpoint for getting new actions.",
@@ -153,25 +176,51 @@ def vehicle_connected(
         db.flush()  # Send to DB to get ID, but don't commit yet
         db.refresh(new_session)
 
-        # Call orchestrator
-        action = compute_and_save_action(
-            db=db,
-            session_id=new_session.id,
-            charger_id=event.charger_id,
-            timestamp=event.timestamp,
-            current_power_kw=event.measured_power_kw,
-            forecasted_energy_kwh=new_session.forecasted_energy_kwh,
-            forecasted_duration_hours=new_session.forecasted_duration_hours,
-            energy_delivered_kwh=new_session.energy_delivered_kwh,
-            community_load_kw=community_load_kw,
-            is_fully_charged=event.is_fully_charged,
-            controlled_charging_points=new_session.controlled_charging_points,
-            time_connection=new_session.start_time,
-            forecasted_energy_kwh_std=new_session.forecasted_energy_kwh_std,
-            forecasted_duration_hours_std=new_session.forecasted_duration_hours_std,
-            forecast_timestamps=forecast_timestamps,
-        )
+        # Persist the session now: it must survive even if the decision step
+        # below fails unexpectedly (orchestrator already soft-handles policy errors).
         db.commit()
+        db.refresh(new_session)
+
+        # Call orchestrator. Policy/obs failures are handled inside and still
+        # return an action dict (possibly with charge=null). This try/except is
+        # only a last resort so a committed session is never rolled back.
+        try:
+            action = compute_and_save_action(
+                db=db,
+                session_id=new_session.id,
+                charger_id=event.charger_id,
+                timestamp=event.timestamp,
+                current_power_kw=event.measured_power_kw,
+                forecasted_energy_kwh=new_session.forecasted_energy_kwh,
+                forecasted_duration_hours=new_session.forecasted_duration_hours,
+                energy_delivered_kwh=new_session.energy_delivered_kwh,
+                community_load_kw=community_load_kw,
+                is_fully_charged=event.is_fully_charged,
+                controlled_charging_points=new_session.controlled_charging_points,
+                time_connection=new_session.start_time,
+                forecasted_energy_kwh_std=new_session.forecasted_energy_kwh_std,
+                forecasted_duration_hours_std=new_session.forecasted_duration_hours_std,
+                forecast_timestamps=forecast_timestamps,
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log_system_error(
+                db,
+                source="vehicle_connected.compute_and_save_action",
+                error=exc,
+                charger_id=charger.id,
+                session_id=new_session.id,
+            )
+            db.commit()
+            return {
+                "session_id": str(new_session.id),
+                "action": None,
+                "warning": (
+                    f"Session created, but unexpected failure while persisting a decision: {exc}. "
+                    "Treat this charger as not charging until the next event."
+                ),
+            }
 
         return {"action": action, "session_id": str(new_session.id)}
 
@@ -229,6 +278,11 @@ def charging_update(
         if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
             session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
 
+        # Persist the telemetry update now: it must survive even if the decision
+        # step below fails unexpectedly (orchestrator already soft-handles policy errors).
+        db.commit()
+        db.refresh(session)
+
         # 3. Call load forecaster
         community_load_kw, forecast_timestamps = forecast_load(
             db=db,
@@ -236,26 +290,44 @@ def charging_update(
             event_time=event.timestamp,
         )
 
-        # 4. Call orchestrator
-        action = compute_and_save_action(
-            db=db,
-            session_id=session.id,
-            charger_id= session.id_charger,
-            timestamp = event.timestamp,
-            current_power_kw=event.avg_power_last_15min_kw,
-            forecasted_energy_kwh=session.forecasted_energy_kwh,
-            forecasted_duration_hours=session.forecasted_duration_hours,
-            energy_delivered_kwh=session.energy_delivered_kwh,
-            community_load_kw=community_load_kw,
-            is_fully_charged=event.is_fully_charged,
-            controlled_charging_points=session.controlled_charging_points,
-            time_connection = session.start_time,
-            forecasted_energy_kwh_std = session.forecasted_energy_kwh_std,
-            forecasted_duration_hours_std = session.forecasted_duration_hours_std,
-            forecast_timestamps=forecast_timestamps,
-        )
+        # 4. Call orchestrator (policy failures return an action dict; this
+        # try/except only protects the already-committed telemetry).
+        try:
+            action = compute_and_save_action(
+                db=db,
+                session_id=session.id,
+                charger_id= session.id_charger,
+                timestamp = event.timestamp,
+                current_power_kw=event.avg_power_last_15min_kw,
+                forecasted_energy_kwh=session.forecasted_energy_kwh,
+                forecasted_duration_hours=session.forecasted_duration_hours,
+                energy_delivered_kwh=session.energy_delivered_kwh,
+                community_load_kw=community_load_kw,
+                is_fully_charged=event.is_fully_charged,
+                controlled_charging_points=session.controlled_charging_points,
+                time_connection = session.start_time,
+                forecasted_energy_kwh_std = session.forecasted_energy_kwh_std,
+                forecasted_duration_hours_std = session.forecasted_duration_hours_std,
+                forecast_timestamps=forecast_timestamps,
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log_system_error(
+                db,
+                source="charging_update.compute_and_save_action",
+                error=exc,
+                charger_id=session.id_charger,
+                session_id=session.id,
+            )
+            db.commit()
+            return {
+                "action": None,
+                "warning": (
+                    f"Telemetry recorded, but unexpected failure while persisting a decision: {exc}."
+                ),
+            }
 
-        db.commit()
         return {"action": action}
 
     except HTTPException:
@@ -336,26 +408,49 @@ def vehicle_disconnected(
 
         print("Session closed:", session_summary)
 
+        # Persist the session closure (+ finalize_session_action) now: it must
+        # survive even if the forecasting-model updates below fail unexpectedly.
+        db.commit()
+
         # 3. Update forecasting models (use persisted session data)
         duration_hours = session.duration
 
-        update_ev_forecast(
-            db=db,
-            charger_id=session.id_charger,
-            start_time=session.start_time,
-            energy_kwh=session.energy_delivered_kwh,
-            duration_hours=duration_hours,
-        )
+        try:
+            update_ev_forecast(
+                db=db,
+                charger_id=session.id_charger,
+                start_time=session.start_time,
+                energy_kwh=session.energy_delivered_kwh,
+                duration_hours=duration_hours,
+            )
 
-        update_ev_duration_cdf(
-            db=db,
-            charger_id=session.id_charger,
-            start_time=session.start_time,
-            duration_hours=duration_hours,
-        )
+            update_ev_duration_cdf(
+                db=db,
+                charger_id=session.id_charger,
+                start_time=session.start_time,
+                duration_hours=duration_hours,
+            )
 
-        # Commit all changes atomically (session closure + both forecasting updates)
-        db.commit()
+            db.commit()
+        except Exception as exc:
+            # The session closure above is already committed and must not be lost here.
+            db.rollback()
+            log_system_error(
+                db,
+                source="vehicle_disconnected.forecast_model_update",
+                error=exc,
+                charger_id=session.id_charger,
+                session_id=session.id,
+            )
+            db.commit()
+            return {
+                "status": "session closed and stored",
+                "session_summary": session_summary,
+                "warning": (
+                    f"Forecasting model update failed unexpectedly: {exc}. "
+                    "Session was still closed and stored correctly."
+                ),
+            }
 
         return {
             "status": "session closed and stored",

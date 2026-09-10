@@ -105,6 +105,9 @@ class ChargingSessions(Base):
     end_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True))
     end_charging_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True))
     duration: Mapped[Optional[float]] = mapped_column(Double(53))
+    # Timestamp of the last accepted connected/update/disconnected event; used
+    # to reject out-of-order events (must always increase).
+    last_event_time: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True))
 
     chargers: Mapped[Optional['Chargers']] = relationship('Chargers', back_populates='charging_sessions')
     actions: Mapped[list['Actions']] = relationship('Actions', back_populates='charging_sessions')
@@ -162,7 +165,8 @@ class Actions(Base):
     is_fully_charged: Mapped[bool] = mapped_column(Boolean, nullable=False)
     probability_disconnection: Mapped[float] = mapped_column(Double(53), nullable=False)
     cumulative_duration_probability: Mapped[float] = mapped_column(Double(53), nullable=False)
-    suggested_action: Mapped[str] = mapped_column(String, nullable=False)
+    # NULL means no decision could be produced (assigned + default policy both failed).
+    suggested_action: Mapped[Optional[str]] = mapped_column(String)
     id_cs: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
     control_policy: Mapped[Optional[str]] = mapped_column(String)
     control_algorithm: Mapped[Optional[str]] = mapped_column(String)
@@ -173,6 +177,9 @@ class Actions(Base):
     # Policy-variable inputs for debugging (e.g. wind_excess_kw). Shape is
     # application-defined; v1 stores {"inputs": { ... policy_context ... }}.
     decision_context: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # True when the assigned policy raised and the default policy was used instead.
+    policy_error: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    policy_error_message: Mapped[Optional[str]] = mapped_column(String)
 
     charging_sessions: Mapped[Optional['ChargingSessions']] = relationship('ChargingSessions', back_populates='actions')
     grid_load_forecasted: Mapped[list['GridLoadForecasted']] = relationship('GridLoadForecasted', back_populates='actions')
@@ -251,3 +258,20 @@ class ForecastJobDB(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
 
     pilot: Mapped['Pilot'] = relationship('Pilot', back_populates='forecast_jobs')
+
+
+class SystemErrors(Base):
+    """Generic error log for failures not tied to a single actions row."""
+
+    __tablename__ = 'system_errors'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='system_errors_pkey'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    charger_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    session_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
+    error_message: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)

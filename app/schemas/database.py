@@ -60,6 +60,7 @@ class ChargingSessionsCreate(BaseModel):
     end_time: Optional[datetime] = None
     end_charging_time: Optional[datetime] = None
     duration: Optional[float] = None
+    last_event_time: Optional[datetime] = None
 
 class ChargingSessionsUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -76,6 +77,7 @@ class ChargingSessionsUpdate(BaseModel):
     end_time: Optional[datetime] = None
     end_charging_time: Optional[datetime] = None
     duration: Optional[float] = None
+    last_event_time: Optional[datetime] = None
 
 class ChargingSessionsRead(BaseModel):
     id: UUID
@@ -92,6 +94,7 @@ class ChargingSessionsRead(BaseModel):
     end_time: Optional[datetime]
     end_charging_time: Optional[datetime]
     duration: Optional[float]
+    last_event_time: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)
 
 class GridLoadForecastedCreate(BaseModel):
@@ -230,7 +233,7 @@ class ActionsCreate(BaseModel):
     is_fully_charged: bool
     probability_disconnection: float
     cumulative_duration_probability: float
-    suggested_action: str
+    suggested_action: Optional[str] = None
     id_cs: Optional[UUID] = None
     control_policy: Optional[str] = None
     control_algorithm: Optional[str] = None
@@ -239,6 +242,8 @@ class ActionsCreate(BaseModel):
     real_action: Optional[str] = None
     real_power_kw: Optional[float] = None
     decision_context: Optional[dict[str, Any]] = None
+    policy_error: bool = False
+    policy_error_message: Optional[str] = None
 
 class ActionsUpdate(BaseModel):
     id: Optional[UUID] = None
@@ -257,6 +262,8 @@ class ActionsUpdate(BaseModel):
     real_action: Optional[str] = None
     real_power_kw: Optional[float] = None
     decision_context: Optional[dict[str, Any]] = None
+    policy_error: Optional[bool] = None
+    policy_error_message: Optional[str] = None
 
 class ActionsRead(BaseModel):
     id: UUID
@@ -266,7 +273,7 @@ class ActionsRead(BaseModel):
     is_fully_charged: bool
     probability_disconnection: float
     cumulative_duration_probability: float
-    suggested_action: str
+    suggested_action: Optional[str] = None
     id_cs: Optional[UUID]
     control_policy: Optional[str] = None
     control_algorithm: Optional[str] = None
@@ -275,6 +282,19 @@ class ActionsRead(BaseModel):
     real_action: Optional[str] = None
     real_power_kw: Optional[float] = None
     decision_context: Optional[dict[str, Any]] = None
+    policy_error: bool = False
+    policy_error_message: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemErrorsRead(BaseModel):
+    id: UUID
+    occurred_at: datetime
+    source: str
+    charger_id: Optional[UUID] = None
+    session_id: Optional[UUID] = None
+    error_message: str
+    context: Optional[dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 
 

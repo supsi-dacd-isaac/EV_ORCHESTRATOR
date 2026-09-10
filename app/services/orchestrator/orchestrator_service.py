@@ -3,16 +3,21 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import numpy as np
 from sqlalchemy.orm import Session
 
 from app.models import Actions, Chargers, GridLoadForecasted
 
+from app.services.common.error_log import log_system_error
 from app.services.orchestrator.observation_builder import prepare_observation
 from app.services.orchestrator.duration_cdf.query import get_cumulative_duration_probability
 from app.services.orchestrator.disconnection_probability import get_disconnection_prob
-from app.services.orchestrator.constants import OBSERVATION_SIZE, FORECAST_STEP_MINUTES
+from app.services.orchestrator.constants import FORECAST_STEP_MINUTES
 from app.services.orchestrator.correction_filter import apply_correction
-from app.services.orchestrator.policy.policy_registry import get_policy
+from app.services.orchestrator.obs_layout import OBS_FULLY_CHARGED, OBSERVATION_SIZE
+from app.services.orchestrator.policy.base_policy import PolicyDecision
+from app.services.orchestrator.policy.policy_registry import DEFAULT_RULE_BASED_SLUG, get_policy
+from app.services.orchestrator.policy.rule_based.default_policy import DefaultRuleBasedPolicy
 
 
 def compute_and_save_action(
@@ -21,7 +26,7 @@ def compute_and_save_action(
         charger_id: str,
         timestamp: datetime,
         current_power_kw: float,
-        forecasted_energy_kwh:float,
+        forecasted_energy_kwh: float,
         forecasted_duration_hours: float,
         energy_delivered_kwh: float,
         community_load_kw: List[float],
@@ -35,10 +40,18 @@ def compute_and_save_action(
     """
     Computes the charging action and saves it to the database.
 
-    Returns the action dict with keys:
-    -charger_id (str)
-    - charge (bool)
+    Resilience contract:
+    - Always persists an ``actions`` row for this event when called successfully.
+    - If the assigned policy fails, tries ``DefaultRuleBasedPolicy``.
+    - If that also fails (or observation cannot be built for it), still persists
+      a row with ``suggested_action=NULL``, ``policy_error=True``, and a warning.
+
+    Returns an action dict with keys:
+    - charger_id (str)
+    - charge (bool | None)  — None when no decision could be produced
+    - suggested_power_kw (float | None)
     - valid_until (timestamp)
+    - warning (str, optional)
     """
 
     # Normalize both to UTC-aware — DB convention is TIMESTAMP WITH TIME ZONE.
@@ -57,37 +70,38 @@ def compute_and_save_action(
     tc_local = to_pilot_time(tc_utc, pilot_tz_name)
 
     connected_hours = (ts_utc - tc_utc).total_seconds() / 3600
-    prob_discon = get_disconnection_prob(charger_id, connected_hours)
-    cum_prob = get_cumulative_duration_probability(charger_id, connected_hours)
 
-    obs = prepare_observation(
-        charger_id=charger_id,
-        is_fully_charged=is_fully_charged,
-        time_connection=tc_local,
-        time_current=ts_local,
-        forecasted_duration_hours=forecasted_duration_hours,
-        forecasted_energy_kwh=forecasted_energy_kwh,
-        current_power_kw=current_power_kw,
-        forecasted_energy_kwh_std=forecasted_energy_kwh_std,
-        forecasted_duration_hours_std=forecasted_duration_hours_std,
-        energy_delivered_kwh=energy_delivered_kwh,
-        community_load_kw=community_load_kw,
-        controlled_charging_points=controlled_charging_points,
-        probability_disconnection=prob_discon,
-        cumulative_duration_probability=cum_prob
-    )
+    # Soft-fail auxiliary signals so a CDF/disconnection lookup cannot kill the
+    # whole decision path (session/event must still get an actions row).
+    try:
+        prob_discon = get_disconnection_prob(charger_id, connected_hours)
+    except Exception as exc:
+        prob_discon = 0.0
+        log_system_error(
+            db,
+            source="compute_and_save_action.disconnection_prob",
+            error=exc,
+            charger_id=charger_id,
+            session_id=session_id,
+        )
+    try:
+        cum_prob = get_cumulative_duration_probability(charger_id, connected_hours)
+    except Exception as exc:
+        cum_prob = 0.0
+        log_system_error(
+            db,
+            source="compute_and_save_action.duration_cdf",
+            error=exc,
+            charger_id=charger_id,
+            session_id=session_id,
+        )
 
-    print(f'The observation for charger {charger_id} at {ts_local} (local) is: {obs}')
-    assert obs.shape == (OBSERVATION_SIZE,), (
-        f"Invalid observation shape {obs.shape}, expected ({OBSERVATION_SIZE},)"
-    )
     charger = db.query(Chargers).filter(Chargers.id == charger_id).first()
     charger_max_kw = charger.nominal_power if charger else float("inf")
     control_algorithm = charger.control_algorithm if charger else None
     control_policy_slug = charger.control_policy if charger else None
     pilot_id = charger.id_pilot if charger else None
 
-    policy = get_policy(control_algorithm, control_policy_slug)
     # Shared session inputs. Policy-specific signals (e.g. wind_excess) are
     # added by policy.enrich_context — the orchestrator does not branch on slug.
     policy_context: Dict = {
@@ -97,22 +111,120 @@ def compute_and_save_action(
         "forecasted_energy_kwh": forecasted_energy_kwh,
         "forecasted_duration_hours": forecasted_duration_hours,
     }
-    policy_context, context_warnings = policy.enrich_context(
-        db,
-        pilot_id=pilot_id,
-        at_time=ts_utc,
-        context=policy_context,
-    )
+    context_warnings: List[str] = []
+    policy_error = False
+    policy_error_message: Optional[str] = None
+    used_fallback = False
+    fallback_failed = False
+    fallback_error_message: Optional[str] = None
 
-    raw_decision = policy.compute_action(obs, context=policy_context)
-    decision, was_corrected = apply_correction(
-        decision=raw_decision,
-        is_fully_charged=is_fully_charged,
-        is_connected=True,
-        charger_max_kw=charger_max_kw,
-    )
-    charge = decision.action == "charge"
-    print(f'Policy action is charge={charge} (raw={raw_decision.action}, corrected={was_corrected})')
+    decision: Optional[PolicyDecision] = None
+    was_corrected = False
+    raw_decision: Optional[PolicyDecision] = None
+    obs: Optional[np.ndarray] = None
+
+    # ── Primary path: observation + assigned policy ──────────────────────────
+    try:
+        obs = prepare_observation(
+            charger_id=charger_id,
+            is_fully_charged=is_fully_charged,
+            time_connection=tc_local,
+            time_current=ts_local,
+            forecasted_duration_hours=forecasted_duration_hours,
+            forecasted_energy_kwh=forecasted_energy_kwh,
+            current_power_kw=current_power_kw,
+            forecasted_energy_kwh_std=forecasted_energy_kwh_std,
+            forecasted_duration_hours_std=forecasted_duration_hours_std,
+            energy_delivered_kwh=energy_delivered_kwh,
+            community_load_kw=community_load_kw,
+            controlled_charging_points=controlled_charging_points,
+            probability_disconnection=prob_discon,
+            cumulative_duration_probability=cum_prob,
+        )
+        print(f'The observation for charger {charger_id} at {ts_local} (local) is: {obs}')
+        assert obs.shape == (OBSERVATION_SIZE,), (
+            f"Invalid observation shape {obs.shape}, expected ({OBSERVATION_SIZE},)"
+        )
+
+        policy = get_policy(control_algorithm, control_policy_slug)
+        policy_context, context_warnings = policy.enrich_context(
+            db,
+            pilot_id=pilot_id,
+            at_time=ts_utc,
+            context=policy_context,
+        )
+        raw_decision = policy.compute_action(obs, context=policy_context)
+        decision, was_corrected = apply_correction(
+            decision=raw_decision,
+            is_fully_charged=is_fully_charged,
+            is_connected=True,
+            charger_max_kw=charger_max_kw,
+        )
+    except Exception as primary_exc:
+        # Assigned policy (or observation build) failed — try the system default.
+        policy_error = True
+        policy_error_message = str(primary_exc)[:2000]
+        log_system_error(
+            db,
+            source="compute_and_save_action.policy",
+            error=primary_exc,
+            charger_id=charger_id,
+            session_id=session_id,
+            context={
+                "control_algorithm": control_algorithm,
+                "control_policy": control_policy_slug,
+            },
+        )
+
+        # ── Fallback path: default rule-based policy ─────────────────────────
+        try:
+            fallback_obs = obs if obs is not None else _minimal_obs_for_fallback(is_fully_charged)
+            raw_decision = DefaultRuleBasedPolicy().compute_action(
+                fallback_obs, context=policy_context
+            )
+            decision, was_corrected = apply_correction(
+                decision=raw_decision,
+                is_fully_charged=is_fully_charged,
+                is_connected=True,
+                charger_max_kw=charger_max_kw,
+            )
+            used_fallback = True
+        except Exception as fallback_exc:
+            # Both policies failed — still persist a row with suggested_action=NULL.
+            fallback_failed = True
+            fallback_error_message = str(fallback_exc)[:2000]
+            log_system_error(
+                db,
+                source="compute_and_save_action.default_policy",
+                error=fallback_exc,
+                charger_id=charger_id,
+                session_id=session_id,
+                context={
+                    "control_algorithm": control_algorithm,
+                    "control_policy": control_policy_slug,
+                    "primary_error": policy_error_message,
+                },
+            )
+            decision = None
+            was_corrected = False
+            raw_decision = None
+
+    if decision is not None:
+        charge: Optional[bool] = decision.action == "charge"
+        suggested_action: Optional[str] = decision.action
+        suggested_power_kw = decision.suggested_power_kw
+        print(
+            f'Policy action is charge={charge} '
+            f'(raw={getattr(raw_decision, "action", None)}, corrected={was_corrected})'
+        )
+    else:
+        charge = None
+        suggested_action = None
+        suggested_power_kw = None
+        print(
+            f'No policy decision for charger {charger_id}: '
+            f'primary={policy_error_message!r}, fallback={fallback_error_message!r}'
+        )
 
     # Snapshot of policy-variable inputs for debugging (actions.decision_context).
     # float("inf") is not JSON-serializable — replace if the charger was missing.
@@ -126,6 +238,17 @@ def compute_and_save_action(
     }
     if context_warnings:
         decision_context["warnings"] = context_warnings
+    if policy_error:
+        decision_context["policy_error"] = {
+            "message": policy_error_message,
+            "assigned_control_algorithm": control_algorithm,
+            "assigned_control_policy": control_policy_slug,
+            "fallback_control_algorithm": "rule_based",
+            "fallback_control_policy": DEFAULT_RULE_BASED_SLUG,
+            "used_fallback": used_fallback,
+            "fallback_failed": fallback_failed,
+            "fallback_error": fallback_error_message,
+        }
 
     # Return valid_until in the caller's timezone if one was provided, otherwise
     # use the pilot's local timezone so the response datetime is always meaningful.
@@ -133,8 +256,16 @@ def compute_and_save_action(
     valid_until = (ts_utc + timedelta(minutes=15)).astimezone(response_tz)
 
     # -----------------------------
-    # Persist action
+    # Persist action (always — including suggested_action=NULL on total failure)
     action_id = uuid4()
+
+    # Compose a short DB message covering both failure layers when needed.
+    persisted_error_message = policy_error_message
+    if fallback_failed and fallback_error_message:
+        persisted_error_message = (
+            f"Assigned policy failed: {policy_error_message}. "
+            f"Default policy also failed: {fallback_error_message}"
+        )[:2000]
 
     action_row = Actions(
         id=action_id,
@@ -144,13 +275,15 @@ def compute_and_save_action(
         is_fully_charged=is_fully_charged,
         probability_disconnection=prob_discon,
         cumulative_duration_probability=cum_prob,
-        suggested_action=decision.action,
+        suggested_action=suggested_action,
         id_cs=session_id,
         control_policy=control_policy_slug,
         control_algorithm=control_algorithm,
         correction_applied=was_corrected,
-        suggested_power_kw=decision.suggested_power_kw,
+        suggested_power_kw=suggested_power_kw,
         decision_context=decision_context,
+        policy_error=policy_error,
+        policy_error_message=persisted_error_message,
     )
 
     db.add(action_row)
@@ -173,12 +306,38 @@ def compute_and_save_action(
 
     # NOTE: commit happens in endpoint
 
-    return {
+    result = {
         'charger_id': charger_id,
         "charge": charge,
-        "suggested_power_kw": decision.suggested_power_kw,
+        "suggested_power_kw": suggested_power_kw,
         "valid_until": valid_until,
     }
+    if fallback_failed:
+        result["warning"] = (
+            f"Assigned policy (control_algorithm={control_algorithm!r}, "
+            f"control_policy={control_policy_slug!r}) failed: {policy_error_message}. "
+            f"Default policy also failed: {fallback_error_message}. "
+            "No charge decision produced (suggested_action=null); "
+            "treat this charger as not charging until the next event."
+        )
+    elif used_fallback:
+        result["warning"] = (
+            f"Assigned policy (control_algorithm={control_algorithm!r}, "
+            f"control_policy={control_policy_slug!r}) failed: {policy_error_message}. "
+            "Used the default rule-based policy instead."
+        )
+    return result
+
+
+def _minimal_obs_for_fallback(is_fully_charged: bool) -> np.ndarray:
+    """Build a tiny observation vector usable only by DefaultRuleBasedPolicy.
+
+    Used when ``prepare_observation`` itself failed, so we still have a chance
+    to apply the default charge-on-arrival rule from ``is_fully_charged``.
+    """
+    obs = np.zeros(OBSERVATION_SIZE, dtype=float)
+    obs[OBS_FULLY_CHARGED] = 1.0 if is_fully_charged else 0.0
+    return obs
 
 
 # ── Retrospective real-action helpers ─────────────────────────────────────────
@@ -220,4 +379,3 @@ def finalize_session_action(
 ) -> None:
     """Fill the last action row of a closing session using the session's final energy total."""
     _fill_previous_action(db, session_id, final_energy_kwh, disconnection_time)
-

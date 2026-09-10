@@ -52,14 +52,16 @@ CREATE TABLE public.actions (
     is_fully_charged boolean NOT NULL,
     probability_disconnection double precision NOT NULL,
     cumulative_duration_probability double precision NOT NULL,
-    suggested_action character varying NOT NULL,
+    suggested_action character varying,
     control_policy character varying,
     control_algorithm character varying,
     correction_applied boolean DEFAULT false NOT NULL,
     suggested_power_kw double precision,
     real_action character varying,
     real_power_kw double precision,
-    decision_context jsonb
+    decision_context jsonb,
+    policy_error boolean DEFAULT false NOT NULL,
+    policy_error_message character varying
 );
 
 
@@ -106,7 +108,8 @@ CREATE TABLE public.charging_sessions (
     controlled_charging_points integer DEFAULT 1 NOT NULL,
     active boolean DEFAULT true NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    client_utc_offset_minutes integer
+    client_utc_offset_minutes integer,
+    last_event_time timestamp with time zone
 );
 
 
@@ -466,6 +469,31 @@ ALTER TABLE ONLY public.forecast_jobs
 
 ALTER TABLE ONLY public.forecast_jobs
     ADD CONSTRAINT forecast_jobs_pilot_fkey FOREIGN KEY (id_pilot) REFERENCES public.pilot(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- Name: system_errors; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.system_errors (
+    id uuid NOT NULL,
+    occurred_at timestamp with time zone DEFAULT now() NOT NULL,
+    source character varying NOT NULL,
+    charger_id uuid,
+    session_id uuid,
+    error_message text NOT NULL,
+    context jsonb
+);
+
+
+ALTER TABLE public.system_errors OWNER TO postgres;
+
+--
+-- Name: system_errors system_errors_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.system_errors
+    ADD CONSTRAINT system_errors_pkey PRIMARY KEY (id);
 
 
 --
