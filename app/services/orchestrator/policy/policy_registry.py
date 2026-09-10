@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.services.orchestrator.policy.base_policy import BasePolicy
-from app.services.orchestrator.policy.ann_policy import AnnPolicy, read_model_sidecar, read_power_levels_kw
+from app.services.orchestrator.policy.ann_policy import (
+    AnnPolicy,
+    require_ann_sidecar_config,
+)
 from app.services.orchestrator.policy.rule_based.default_policy import DefaultRuleBasedPolicy
 from app.services.orchestrator.policy.rule_based.wind_max_policy import WindMaxPolicy
 
@@ -28,7 +31,7 @@ _DEFAULT_CACHE_KEY = f"rule_based:{DEFAULT_RULE_BASED_SLUG}"
 
 
 def models_dir() -> Path:
-    """Directory holding the ANN .pth files and their optional .json sidecars."""
+    """Directory holding the ANN .pth files and their required .json sidecars."""
     from app.config import ACTOR_MODEL_PATH
 
     return Path(ACTOR_MODEL_PATH).parent
@@ -88,6 +91,8 @@ def validate_policy_reference(
         model_path = models_dir() / control_policy
         if not model_path.exists():
             raise ValueError(f"ANN model file not found: '{control_policy}'.")
+        # Ensure the sidecar declares a usable observation layout before assignment.
+        require_ann_sidecar_config(model_path)
         return
 
     if control_algorithm == "rule_based":
@@ -174,15 +179,17 @@ def _load_ann(policy_filename: str) -> AnnPolicy:
             "Place the .pth file in the models directory."
         )
 
-    # Option A: sidecar .json carries power-level metadata; absent = binary mode.
-    # Same readers as the policy listing, so the description of a model always
-    # matches the configuration inference actually runs with.
-    power_levels_kw, problems = read_power_levels_kw(read_model_sidecar(model_path))
-    for problem in problems:
-        logger.warning("ANN model '%s': %s", policy_filename, problem)
+    # Sidecar is mandatory: observation_features define the ANN input layout.
+    # Same readers as the policy listing / assignment validation.
+    try:
+        observation_features, power_levels_kw = require_ann_sidecar_config(model_path)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     return AnnPolicy(
         model_path=str(model_path),
+        observation_features=observation_features,
         deterministic=True,
         power_levels_kw=power_levels_kw,
+        check_input_dim=True,
     )

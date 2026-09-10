@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
@@ -10,6 +12,17 @@ from pydantic import BaseModel
 from app.db.session import SessionLocal
 from app.services.common.auth import TokenData, get_current_user
 from app.services.common.authorization import ensure_charger_access, require_admin
+from app.services.orchestrator.obs_layout import (
+    DEFAULT_OBSERVATION_FEATURES,
+    OBSERVATION_SIZE,
+    list_observation_features,
+    observation_dim,
+)
+from app.services.orchestrator.policy.ann_policy import (
+    AnnPolicy,
+    read_observation_features,
+    read_power_levels_kw,
+)
 from app.services.orchestrator.policy.policy_registry import (
     describe_policies,
     invalidate_policy_cache,
@@ -50,37 +63,147 @@ def _validate_filename(filename: Optional[str], expected_suffix: str) -> str:
 @admin_router.post("/ann/upload")
 async def upload_ann_model(
     model_file: UploadFile,
-    sidecar_file: Optional[UploadFile] = None,
+    sidecar_file: UploadFile,
     current_user: TokenData = Depends(get_current_user),
 ):
     """
-    Upload a new ANN model (.pth) and optional sidecar (.json) describing
-    power_levels_kw. Saves to the models directory used by the policy registry.
+    Upload a new ANN model (.pth) and its required sidecar (.json).
+
+    The sidecar must:
+    - use the same basename as the model (``model.pth`` → ``model.json``)
+    - declare ``observation_features`` (ordered catalog names)
+    - optionally declare ``power_levels_kw`` (omit for binary charge/not_charge)
+
+    The assembled feature length must match the model's input dimension.
     No restart needed — the registry loads by filename on next use.
     """
     require_admin(current_user)
 
     model_filename = _validate_filename(model_file.filename, ".pth")
+    sidecar_filename = _validate_filename(sidecar_file.filename, ".json")
+    if Path(sidecar_filename).stem != Path(model_filename).stem:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Sidecar filename stem must match the model stem "
+                f"('{Path(model_filename).stem}.json')."
+            ),
+        )
+
+    model_bytes = await model_file.read()
+    sidecar_bytes = await sidecar_file.read()
+
+    try:
+        sidecar = json.loads(sidecar_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sidecar is not valid UTF-8 JSON: {exc}",
+        ) from exc
+
+    if not isinstance(sidecar, dict):
+        raise HTTPException(status_code=400, detail="Sidecar JSON must be an object.")
+
+    observation_features, obs_problems = read_observation_features(sidecar)
+    if observation_features is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid observation_features: " + "; ".join(obs_problems),
+        )
+
+    power_levels_kw, power_problems = read_power_levels_kw(sidecar)
+
     directory = models_dir()
     directory.mkdir(parents=True, exist_ok=True)
-
     model_path = directory / model_filename
-    model_path.write_bytes(await model_file.read())
+    sidecar_path = directory / sidecar_filename
 
-    sidecar_filename = None
-    if sidecar_file is not None:
-        sidecar_filename = _validate_filename(sidecar_file.filename, ".json")
-        sidecar_path = directory / sidecar_filename
-        sidecar_path.write_bytes(await sidecar_file.read())
+    model_path.write_bytes(model_bytes)
+    sidecar_path.write_bytes(sidecar_bytes)
+
+    # Verify network input dim against sidecar features; roll back on mismatch.
+    try:
+        policy = AnnPolicy(
+            model_path=str(model_path),
+            observation_features=observation_features,
+            deterministic=True,
+            power_levels_kw=power_levels_kw,
+            check_input_dim=True,
+        )
+        architecture = policy._architecture()
+    except Exception as exc:
+        model_path.unlink(missing_ok=True)
+        sidecar_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Uploaded ANN failed validation: {exc}",
+        ) from exc
 
     # Drop any stale cached instance so the next request loads the new file.
     invalidate_policy_cache("ann", model_filename)
 
-    return {
+    response = {
         "status": "uploaded",
         "model_filename": model_filename,
         "sidecar_filename": sidecar_filename,
         "control_policy_slug": model_filename,
+        "observation_features": observation_features,
+        "observation_dim_expected": observation_dim(observation_features),
+        "observation_dim_model": architecture.get("observation_dim"),
+        "power_levels_kw": power_levels_kw,
+        "is_binary": power_levels_kw is None,
+    }
+    if power_problems:
+        response["warnings"] = power_problems
+    return response
+
+
+@admin_router.get("/observation-features")
+def get_observation_features(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """List every observation feature name that ANN sidecars may declare.
+
+    Admin-only catalog for writing ``observation_features`` in a model sidecar.
+    Includes size, description, whether each name is in the default full layout,
+    and the default ordered feature list (historical 44-dim observation).
+    """
+    require_admin(current_user)
+
+    features = list_observation_features()
+    return {
+        "count": len(features),
+        "default_observation_dim": OBSERVATION_SIZE,
+        "default_observation_features": list(DEFAULT_OBSERVATION_FEATURES),
+        "features": features,
+        "example_sidecar": {
+            "name": "Example ANN",
+            "description": "Binary model using a small feature subset.",
+            "observation_features": [
+                "fully_charged",
+                "time_curr_sin",
+                "time_curr_cos",
+                "connected_time_relative",
+                "energy_charged_rel_needed",
+                "community_load",
+            ],
+            "power_levels_kw": None,
+        },
+        "notes": [
+            "Copy names from 'features' (or from 'default_observation_features' for the "
+            "full historical layout) into the sidecar field observation_features. "
+            "Order must match training order.",
+            "Example: the 'example_sidecar' object above is a valid .json shape. "
+            "Omit power_levels_kw (or set it to a kW list) depending on binary vs "
+            "discrete power-level models. Sum of sizes for that example list is "
+            "1+1+1+1+1+24 = 29, so the ANN input dim must be 29.",
+            "The assembled length (sum of feature sizes) must equal the ANN "
+            "model's input dimension.",
+            "community_load is a vector whose size equals "
+            "BASELOAD_FORECAST_HORIZON_STEPS.",
+            "Upload models with POST /admin/policies/ann/upload (sidecar required; "
+            "basename must match, e.g. my_model.pth + my_model.json).",
+        ],
     }
 
 

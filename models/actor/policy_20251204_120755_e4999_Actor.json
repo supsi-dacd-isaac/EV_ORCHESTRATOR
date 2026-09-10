@@ -1,0 +1,27 @@
+{
+  "name": "Default ANN (binary charge / not_charge)",
+  "description": "Historical default Actor model. Uses the full default observation layout (44 features). Binary outputs: class 0 = not_charge, class 1 = charge.",
+  "observation_features": [
+    "vehicle_connected",
+    "fully_charged",
+    "time_conn_sin",
+    "time_conn_cos",
+    "time_curr_sin",
+    "time_curr_cos",
+    "month_sin",
+    "month_cos",
+    "connected_time_relative",
+    "energy_forecasted_rel_capacity",
+    "energy_forecasted_log",
+    "energy_forecasted_std_norm",
+    "duration_forecasted_log",
+    "duration_forecasted_std_norm",
+    "probability_disconnection",
+    "cumulative_duration_probability",
+    "energy_charged_rel_needed",
+    "charging_rate_norm",
+    "num_charging_points_norm",
+    "load_level_relative",
+    "community_load"
+  ]
+}

@@ -4,18 +4,24 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+from app.services.orchestrator.observation_builder import select_observation_from_default
+from app.services.orchestrator.obs_layout import (
+    observation_dim,
+    validate_feature_names,
+)
 
 from .actor import Actor
 from .base_policy import BasePolicy, PolicyDecision
 
 logger = logging.getLogger(__name__)
 
-# A model file "model.pth" may be accompanied by "model.json" carrying metadata.
+# A model file "model.pth" must be accompanied by "model.json" carrying metadata.
 SIDECAR_SUFFIX = ".json"
 
 
@@ -30,7 +36,7 @@ def read_model_sidecar(model_path: Path) -> Dict[str, Any]:
         return {}
 
     try:
-        content = json.loads(path.read_text())
+        content = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not read model sidecar %s: %s", path, exc)
         return {}
@@ -66,6 +72,63 @@ def read_power_levels_kw(sidecar: Dict[str, Any]) -> Tuple[Optional[List[float]]
     return levels, []
 
 
+def read_observation_features(
+    sidecar: Dict[str, Any],
+) -> Tuple[Optional[List[str]], List[str]]:
+    """Extract required observation_features from sidecar metadata.
+
+    Returns (feature_names, problems). feature_names is None when the field is
+    missing or unusable — callers must treat that as a hard configuration error.
+    """
+    raw = sidecar.get("observation_features")
+    if raw is None:
+        return None, [
+            "Sidecar is missing required 'observation_features' "
+            "(ordered list of catalog feature names)."
+        ]
+
+    if not isinstance(raw, (list, tuple)):
+        return None, ["Sidecar 'observation_features' must be a list of feature names."]
+
+    names = [str(item) for item in raw]
+    problems = validate_feature_names(names)
+    if problems:
+        return None, problems
+    return names, []
+
+
+def require_ann_sidecar_config(model_path: Path) -> Tuple[List[str], Optional[List[float]]]:
+    """Load and validate sidecar config required to run an ANN model.
+
+    Raises ValueError when the sidecar is missing or observation_features is invalid.
+    power_levels_kw may still be None (binary mode).
+    """
+    sidecar_file = sidecar_path_for(model_path)
+    if not sidecar_file.exists():
+        raise ValueError(
+            f"ANN model '{model_path.name}' requires sidecar '{sidecar_file.name}'."
+        )
+
+    sidecar = read_model_sidecar(model_path)
+    if not sidecar:
+        raise ValueError(
+            f"ANN sidecar '{sidecar_file.name}' is missing, unreadable, or not a JSON object."
+        )
+
+    observation_features, obs_problems = read_observation_features(sidecar)
+    if observation_features is None:
+        raise ValueError(
+            f"ANN sidecar '{sidecar_file.name}' has invalid observation_features: "
+            + "; ".join(obs_problems)
+        )
+
+    power_levels_kw, power_problems = read_power_levels_kw(sidecar)
+    for problem in power_problems:
+        logger.warning("ANN model '%s': %s", model_path.name, problem)
+
+    return observation_features, power_levels_kw
+
+
 def _action_mapping_rules(power_levels_kw: Optional[List[float]]) -> List[str]:
     """Plain-language mapping from model output class to charging action."""
     rules = ["The output class with the highest score wins (argmax over the model outputs)."]
@@ -90,19 +153,48 @@ class AnnPolicy(BasePolicy):
     Binary mode (power_levels_kw=None): output class 0 = not_charge, 1 = charge.
     Power-level mode: each output class index maps to a kW value in power_levels_kw,
     e.g. [0.0, 3.7, 7.4] for a 3-class model. Both modes share the same Actor code.
+
+    ``observation_features`` is the ordered sidecar list of catalog names. The
+    orchestrator still passes the default full observation; this policy selects
+    and reorders the declared subset before inference.
     """
 
     def __init__(
         self,
         model_path: str,
+        observation_features: Sequence[str],
         deterministic: bool = True,
         power_levels_kw: Optional[List[float]] = None,
+        *,
+        check_input_dim: bool = True,
     ):
+        problems = validate_feature_names(observation_features)
+        if problems:
+            raise ValueError("; ".join(problems))
+
         self.model_path = Path(model_path)
+        self.observation_features: List[str] = list(observation_features)
+        self.expected_observation_dim = observation_dim(self.observation_features)
         self.actor = Actor(model_path)
         self.deterministic = deterministic
         # None → binary; list → discrete power levels indexed by action class
         self.power_levels_kw = power_levels_kw
+
+        if check_input_dim:
+            self._assert_input_dim_matches()
+
+    def _assert_input_dim_matches(self) -> None:
+        architecture = self._architecture()
+        model_dim = architecture.get("observation_dim")
+        if model_dim is None:
+            return
+        if model_dim != self.expected_observation_dim:
+            raise ValueError(
+                f"ANN model '{self.model_path.name}' expects observation_dim={model_dim}, "
+                f"but sidecar observation_features assemble to "
+                f"{self.expected_observation_dim} "
+                f"({len(self.observation_features)} features)."
+            )
 
     def compute_action(
         self,
@@ -110,11 +202,18 @@ class AnnPolicy(BasePolicy):
         context: Optional[Dict[str, Any]] = None,
     ) -> PolicyDecision:
         # context is unused: this ANN only relies on the normalized obs vector.
-        with torch.no_grad():
-            if obs.ndim == 1:
-                obs = obs[None, :]
+        model_obs = select_observation_from_default(obs, self.observation_features)
+        if model_obs.shape != (self.expected_observation_dim,):
+            raise ValueError(
+                f"Assembled ANN observation has shape {model_obs.shape}, "
+                f"expected ({self.expected_observation_dim},)."
+            )
 
-            obs_tensor = torch.from_numpy(obs)
+        with torch.no_grad():
+            if model_obs.ndim == 1:
+                model_obs = model_obs[None, :]
+
+            obs_tensor = torch.from_numpy(model_obs)
             logits = self.actor(obs_tensor)
 
             if self.deterministic:
@@ -146,15 +245,24 @@ class AnnPolicy(BasePolicy):
         """
         sidecar = read_model_sidecar(model_path)
         power_levels_kw, problems = read_power_levels_kw(sidecar)
+        observation_features, obs_problems = read_observation_features(sidecar)
+        problems.extend(obs_problems)
         sidecar_file = sidecar_path_for(model_path)
 
-        if sidecar_file.exists() and not sidecar:
-            # Without this the model would silently fall back to binary mode and
-            # the only trace would be a log line.
+        if not sidecar_file.exists():
+            problems.append(
+                f"Required sidecar '{sidecar_file.name}' is missing. "
+                "ANN models cannot run without observation_features."
+            )
+        elif sidecar_file.exists() and not sidecar:
             problems.append(
                 f"Sidecar '{sidecar_file.name}' exists but holds no usable metadata "
-                "(unreadable, empty, or not a JSON object) - running in binary mode."
+                "(unreadable, empty, or not a JSON object)."
             )
+
+        expected_dim = (
+            observation_dim(observation_features) if observation_features is not None else None
+        )
 
         try:
             stat = model_path.stat()
@@ -170,13 +278,15 @@ class AnnPolicy(BasePolicy):
             "summary": sidecar.get("description")
             or (
                 "Trained neural-network policy. Reads the normalized observation "
-                "vector built for the charger and picks the charging action with the "
-                "highest score."
+                "features declared in its sidecar and picks the charging action with "
+                "the highest score."
             ),
             "is_binary": power_levels_kw is None,
             "power_levels_kw": power_levels_kw,
             "power_selection": "binary" if power_levels_kw is None else "discrete_levels",
             "rules": _action_mapping_rules(power_levels_kw),
+            "observation_features": observation_features,
+            "observation_dim_expected": expected_dim,
             "parameters": {
                 "model_filename": model_path.name,
                 "model_file_size_bytes": size_bytes,
@@ -185,11 +295,15 @@ class AnnPolicy(BasePolicy):
                 "sidecar": sidecar,
                 "deterministic": True,
                 "num_action_classes": 2 if power_levels_kw is None else len(power_levels_kw),
+                "observation_features": observation_features,
+                "observation_dim_expected": expected_dim,
             },
             "notes": [
                 "Taken from the model file and its sidecar .json only: the network "
                 "weights are not loaded here, so the number of output classes is the "
                 "one declared by the sidecar and is not verified against the model.",
+                "observation_features is required and must list catalog names in "
+                "training order.",
                 "Binary mode is assumed when no sidecar declares power_levels_kw.",
             ],
         }
@@ -203,20 +317,24 @@ class AnnPolicy(BasePolicy):
         description = self.describe_model_file(self.model_path)
         architecture = self._architecture()
 
-        # The instance is authoritative: power levels may have been passed in
-        # directly rather than read from the sidecar.
+        # The instance is authoritative: power levels / features may have been
+        # passed in directly rather than only read from the sidecar.
         description["is_binary"] = self.power_levels_kw is None
         description["power_levels_kw"] = self.power_levels_kw
         description["power_selection"] = (
             "binary" if self.power_levels_kw is None else "discrete_levels"
         )
         description["rules"] = _action_mapping_rules(self.power_levels_kw)
+        description["observation_features"] = self.observation_features
+        description["observation_dim_expected"] = self.expected_observation_dim
         description["parameters"].update(
             {
                 "deterministic": self.deterministic,
                 "device": str(self.actor.device),
                 "num_action_classes": architecture.get("num_output_classes")
                 or description["parameters"]["num_action_classes"],
+                "observation_features": self.observation_features,
+                "observation_dim_expected": self.expected_observation_dim,
                 **architecture,
             }
         )
@@ -228,6 +346,13 @@ class AnnPolicy(BasePolicy):
             description.setdefault("warnings", []).append(
                 f"The model has {num_classes} output classes but the configuration "
                 f"expects {expected}. Actions may be mapped to the wrong power level."
+            )
+
+        model_dim = architecture.get("observation_dim")
+        if model_dim is not None and model_dim != self.expected_observation_dim:
+            description.setdefault("warnings", []).append(
+                f"The model has observation_dim={model_dim} but sidecar features "
+                f"assemble to {self.expected_observation_dim}."
             )
         return description
 
