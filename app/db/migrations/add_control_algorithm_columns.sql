@@ -117,61 +117,17 @@ WHERE control_policy IS NOT NULL
 
 
 -- -----------------------------------------------------------------------------
--- BLOCK 5 — actions table: retroactive backfill of real_action / real_power_kw
+-- BLOCK 5 — intentionally omitted: no retroactive real_action / real_power_kw
 --
--- Actions.energy_delivered_kwh is the cumulative energy at action time.
--- The delta between consecutive rows within the same session equals the energy
--- actually delivered during that 15-minute interval.
+-- Historical rows keep real_action / real_power_kw = NULL (columns added above).
+-- New decisions fill these at runtime via finalize_session_action /
+-- _fill_previous_action in the orchestrator.
 --
--- Part A: all rows that have a following row in the same session (LEAD window).
--- Part B: the last row of each completed session, using the session final total.
--- Rows from still-active sessions and isolated single-action sessions keep NULL.
+-- A previous version of this migration tried to backfill from energy deltas
+-- between consecutive actions, but bare `current_time` is a Postgres builtin
+-- (type time with time zone), which broke timestamp subtraction against the
+-- actions."current_time" column. Quoting would fix that, but backfill is not
+-- required for the new app to run — skipping it keeps the migration simple.
 -- -----------------------------------------------------------------------------
-
--- Part A: rows with a known following row
-WITH next_values AS (
-    SELECT
-        id,
-        LEAD(energy_delivered_kwh) OVER (PARTITION BY id_cs ORDER BY current_time) AS next_energy,
-        LEAD(current_time)         OVER (PARTITION BY id_cs ORDER BY current_time) AS next_time
-    FROM actions
-)
-UPDATE actions a
-SET
-    real_action   = CASE
-                      WHEN (nv.next_energy - a.energy_delivered_kwh) > 0.05 THEN 'charge'
-                      ELSE 'not_charge'
-                    END,
-    real_power_kw = (nv.next_energy - a.energy_delivered_kwh) /
-                    GREATEST(
-                        EXTRACT(EPOCH FROM (nv.next_time - a.current_time)) / 3600.0,
-                        0.001
-                    )
-FROM next_values nv
-WHERE a.id = nv.id
-  AND nv.next_time IS NOT NULL
-  AND a.real_action IS NULL;
-
--- Part B: last row of each completed session (no following action row exists)
-UPDATE actions a
-SET
-    real_action   = CASE
-                      WHEN (cs.energy_delivered_kwh - a.energy_delivered_kwh) > 0.05 THEN 'charge'
-                      ELSE 'not_charge'
-                    END,
-    real_power_kw = (cs.energy_delivered_kwh - a.energy_delivered_kwh) /
-                    GREATEST(
-                        EXTRACT(EPOCH FROM (cs.end_time - a.current_time)) / 3600.0,
-                        0.001
-                    )
-FROM charging_sessions cs
-WHERE a.id_cs = cs.id
-  AND cs.active = FALSE
-  AND a.real_action IS NULL
-  AND NOT EXISTS (
-      SELECT 1 FROM actions a2
-      WHERE a2.id_cs = a.id_cs
-        AND a2.current_time > a.current_time
-  );
 
 COMMIT;
