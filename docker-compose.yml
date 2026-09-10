@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     env_file:
-      - .env
+      - .env.local
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -30,7 +30,7 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - .env.local
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:?POSTGRES_DB is required}
     ports:
@@ -48,7 +48,7 @@ services:
       celery -A app.celery_apps.worker.celery_app worker -l INFO -Q celery
     working_dir: /app
     env_file:
-      - .env
+      - .env.local
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -71,7 +71,7 @@ services:
       celery -A app.celery_apps.scheduler.scheduler_app worker --beat -l INFO -Q scheduler
     working_dir: /app
     env_file:
-      - .env
+      - .env.local
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       CELERY_BROKER_URL: redis://redis:6379/0
