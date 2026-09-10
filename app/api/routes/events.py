@@ -47,6 +47,61 @@ class VehicleDisconnectedEvent(BaseModel):
     energy_delivered_kwh: float
     is_fully_charged: bool
 
+
+def _validate_event_ordering(
+    session: ChargingSessions,
+    event_ts_utc: datetime,
+    *,
+    event_label: str,
+    require_strictly_after: bool,
+) -> None:
+    """Reject out-of-order events using the session's own timeline (Change 2).
+
+    Two rules, both compared in UTC:
+    - the event must never predate the session connection (``start_time``);
+    - the event must be consistent with the last accepted event
+      (``last_event_time``).
+
+    ``require_strictly_after``:
+    - True  (charging_update / vehicle_disconnected): the event must come
+      strictly after the last recorded event — updates and the disconnection
+      always move the timeline forward.
+    - False (a second vehicle_connected on an already-active session): only
+      reject events that rewind before the last recorded event; an equal
+      timestamp is tolerated because no new time has actually elapsed.
+
+    Raises HTTPException 400 without mutating the session on rejection.
+    """
+    start = session.start_time
+    if start is not None and event_ts_utc < start:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{event_label} timestamp {event_ts_utc.isoformat()} is before the "
+                f"session connection time {start.isoformat()}."
+            ),
+        )
+
+    last = session.last_event_time
+    if last is not None:
+        if require_strictly_after and event_ts_utc <= last:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{event_label} timestamp {event_ts_utc.isoformat()} must be "
+                    f"strictly after the last recorded event time {last.isoformat()}."
+                ),
+            )
+        if not require_strictly_after and event_ts_utc < last:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{event_label} timestamp {event_ts_utc.isoformat()} is before the "
+                    f"last recorded event time {last.isoformat()}."
+                ),
+            )
+
+
 @router.post("/vehicle_connected")
 def vehicle_connected(
     event: VehicleConnectedEvent,
@@ -97,9 +152,22 @@ def vehicle_connected(
         if existing_session:
             # Active session found: compute action based on existing session and send warning
 
+            # Change 2: a repeated connect must not rewind before the last event.
+            existing_pilot_tz = pilot.timezone_name if pilot else "UTC"
+            event_ts_utc = to_utc(event.timestamp, local_tz=existing_pilot_tz)
+            _validate_event_ordering(
+                existing_session,
+                event_ts_utc,
+                event_label="vehicle_connected",
+                require_strictly_after=False,
+            )
+
             current_power_kw = event.measured_power_kw
             energy_delivered_kwh = existing_session.energy_delivered_kwh
             is_fully_charged = event.is_fully_charged
+
+            # Advance the session timeline; persisted by the same commit below.
+            existing_session.last_event_time = event_ts_utc
 
             # Policy failures are handled inside compute_and_save_action (fallback /
             # suggested_action=NULL). This try/except is only a last resort for
@@ -171,6 +239,8 @@ def vehicle_connected(
             controlled_charging_points=controlled_charging_points,
             active=True,
             id_charger=charger.id,
+            # Change 2: the connection is the first event on the timeline.
+            last_event_time=to_utc(event.timestamp, local_tz=pilot_tz_name),
         )
         db.add(new_session)
         db.flush()  # Send to DB to get ID, but don't commit yet
@@ -272,11 +342,24 @@ def charging_update(
 
         # 2. Update session dynamic state
         pilot_tz_name = pilot.timezone_name if pilot else "UTC"
+
+        # Change 2: reject updates that are not strictly after the last event
+        # (validated before any state mutation so a rejection changes nothing).
+        event_ts_utc = to_utc(event.timestamp, local_tz=pilot_tz_name)
+        _validate_event_ordering(
+            session,
+            event_ts_utc,
+            event_label="charging_update",
+            require_strictly_after=True,
+        )
+
         session.energy_delivered_kwh += event.energy_delivered_kwh
         # session.avg_measured_power_kw = event.avg_power_last_15min_kw
         session.is_fully_charged = event.is_fully_charged
         if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
             session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
+        # Advance the timeline; persisted by the telemetry commit below.
+        session.last_event_time = event_ts_utc
 
         # Persist the telemetry update now: it must survive even if the decision
         # step below fails unexpectedly (orchestrator already soft-handles policy errors).
@@ -370,12 +453,25 @@ def vehicle_disconnected(
 
         # 2. Update session final state
         pilot_tz_name = get_pilot_tz_for_charger(db, str(session.id_charger))
+
+        # Change 2: the disconnection must be strictly after the last event
+        # (validated before any state mutation so a rejection changes nothing).
+        event_ts_utc = to_utc(event.timestamp, local_tz=pilot_tz_name)
+        _validate_event_ordering(
+            session,
+            event_ts_utc,
+            event_label="vehicle_disconnected",
+            require_strictly_after=True,
+        )
+
         session.energy_delivered_kwh = session.energy_delivered_kwh + event.energy_delivered_kwh
         if session.end_charging_time is None:
             session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
         session.end_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
         session.duration = (session.end_time - session.start_time).total_seconds() / 3600
         session.active = False
+        # The disconnection is the final event on the session timeline.
+        session.last_event_time = event_ts_utc
 
         # persist changes (but don't commit yet)
         db.flush()
