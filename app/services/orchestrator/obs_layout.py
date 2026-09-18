@@ -129,14 +129,68 @@ FEATURES: Dict[str, ObservationFeature] = {
     "load_level_relative": ObservationFeature(
         name="load_level_relative",
         size=1,
-        description="(controlled points × current power) / first community-load step.",
+        description="(controlled points × current power) / first net-demand-forecast step.",
     ),
-    "community_load": ObservationFeature(
-        name="community_load",
+    # Site load forecasts (kW series, then normalized in observation_builder).
+    # Default ANN layout uses only net_demand_forecast (same role as the former
+    # community_load). demand_forecast / generation_forecast are optional extras
+    # for policies that declare them in a sidecar; they are fetched only when needed.
+    "demand_forecast": ObservationFeature(
+        name="demand_forecast",
         size=BASELOAD_FORECAST_HORIZON_STEPS,
         description=(
-            f"Normalized community / base-load forecast vector "
+            f"Normalized site demand forecast "
             f"({BASELOAD_FORECAST_HORIZON_STEPS} steps of 15 minutes)."
+        ),
+    ),
+    "generation_forecast": ObservationFeature(
+        name="generation_forecast",
+        size=BASELOAD_FORECAST_HORIZON_STEPS,
+        description=(
+            f"Normalized on-site generation forecast (PV/wind), same horizon "
+            f"({BASELOAD_FORECAST_HORIZON_STEPS} × 15 min)."
+        ),
+    ),
+    "net_demand_forecast": ObservationFeature(
+        name="net_demand_forecast",
+        size=BASELOAD_FORECAST_HORIZON_STEPS,
+        description=(
+            f"Normalized net site load = demand − generation "
+            f"({BASELOAD_FORECAST_HORIZON_STEPS} steps of 15 minutes). "
+            f"When generation is unavailable, equals demand (with a warning)."
+        ),
+    ),
+    # Measured grid net-power stats from Influx (Phase 4A). Not in the default
+    # 44-dim layout — ANN sidecars opt in. Net = sum(import sensors) −
+    # sum(export sensors); positive means drawing energy from the grid.
+    # Values are divided by max(n_charging_points × rate_kw, ε) for the ANN.
+    "grid_net_power_max_month": ObservationFeature(
+        name="grid_net_power_max_month",
+        size=1,
+        description=(
+            "Max of measured grid net power over the current calendar month "
+            "(pilot timezone), normalized. Net = sum(import sensors) − "
+            "sum(export sensors); positive = drawing from the grid. "
+            "Import sensors meter energy taken from the grid; export sensors "
+            "meter energy injected to the grid."
+        ),
+    ),
+    "grid_net_power_q40_month": ObservationFeature(
+        name="grid_net_power_q40_month",
+        size=1,
+        description=(
+            "40th percentile of measured grid net power over the current "
+            "calendar month (pilot timezone), normalized. Same net definition "
+            "as grid_net_power_max_month (import − export; + = from grid)."
+        ),
+    ),
+    "grid_net_power_q70_month": ObservationFeature(
+        name="grid_net_power_q70_month",
+        size=1,
+        description=(
+            "70th percentile of measured grid net power over the current "
+            "calendar month (pilot timezone), normalized. Same net definition "
+            "as grid_net_power_max_month (import − export; + = from grid)."
         ),
     ),
 }
@@ -165,7 +219,7 @@ DEFAULT_OBSERVATION_FEATURES: Tuple[str, ...] = (
     "charging_rate_norm",
     "num_charging_points_norm",
     "load_level_relative",
-    "community_load",
+    "net_demand_forecast",
 )
 
 
@@ -250,4 +304,4 @@ OBS_ENERGY_CHARGED_REL_NEEDED = _DEFAULT_INDEX["energy_charged_rel_needed"]
 OBS_CHARGING_RATE_NORM = _DEFAULT_INDEX["charging_rate_norm"]
 OBS_NUM_CHARGING_POINTS_NORM = _DEFAULT_INDEX["num_charging_points_norm"]
 OBS_LOAD_LEVEL_RELATIVE = _DEFAULT_INDEX["load_level_relative"]
-OBS_COMMUNITY_LOAD_START = _DEFAULT_INDEX["community_load"]
+OBS_NET_DEMAND_FORECAST_START = _DEFAULT_INDEX["net_demand_forecast"]

@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from datetime import datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -9,15 +9,34 @@ from sqlalchemy.orm import Session
 from app.models import Actions, Chargers, GridLoadForecasted
 
 from app.services.common.error_log import log_system_error
+from app.services.load_forecast.load_forecaster_service import (
+    SiteLoadBundle,
+    fetch_site_load_for_features,
+)
 from app.services.orchestrator.observation_builder import prepare_observation
 from app.services.orchestrator.duration_cdf.query import get_cumulative_duration_probability
 from app.services.orchestrator.disconnection_probability import get_disconnection_prob
-from app.services.orchestrator.constants import FORECAST_STEP_MINUTES
 from app.services.orchestrator.correction_filter import apply_correction
-from app.services.orchestrator.obs_layout import OBS_FULLY_CHARGED, OBSERVATION_SIZE
-from app.services.orchestrator.policy.base_policy import PolicyDecision
+from app.services.orchestrator.policy.ann_policy import AnnPolicy
+from app.services.orchestrator.policy.base_policy import BasePolicy, PolicyDecision
 from app.services.orchestrator.policy.policy_registry import DEFAULT_RULE_BASED_SLUG, get_policy
 from app.services.orchestrator.policy.rule_based.default_policy import DefaultRuleBasedPolicy
+from app.services.orchestrator.signals.grid_net_power import (
+    GridNetPowerStats,
+    features_need_grid_net_power,
+    fetch_grid_net_power_stats,
+)
+
+def _observation_features_for_policy(policy: BasePolicy) -> Sequence[str]:
+    """ANN → sidecar list; rule-based → no observation features.
+
+    Rule-based policies read scalars from ``context`` (including
+    ``is_fully_charged``), so they do not need an assembled obs vector and
+    must not trigger site-load fetches.
+    """
+    if isinstance(policy, AnnPolicy):
+        return policy.observation_features
+    return ()
 
 
 def compute_and_save_action(
@@ -29,16 +48,18 @@ def compute_and_save_action(
         forecasted_energy_kwh: float,
         forecasted_duration_hours: float,
         energy_delivered_kwh: float,
-        community_load_kw: List[float],
         is_fully_charged: bool,
         controlled_charging_points: int,
         time_connection: datetime,
         forecasted_energy_kwh_std: float,
         forecasted_duration_hours_std: float,
-        forecast_timestamps: Optional[List[datetime]] = None,
 ) -> Dict:
     """
     Computes the charging action and saves it to the database.
+
+    Site load (demand/generation/net) is fetched only when the assigned policy's
+    observation features need it. A demand failure triggers the Default policy
+    fallback (no silent 120 kW fill).
 
     Resilience contract:
     - Always persists an ``actions`` row for this event when called successfully.
@@ -110,6 +131,7 @@ def compute_and_save_action(
         "connected_time_hours": connected_hours,
         "forecasted_energy_kwh": forecasted_energy_kwh,
         "forecasted_duration_hours": forecasted_duration_hours,
+        "is_fully_charged": bool(is_fully_charged),
     }
     context_warnings: List[str] = []
     policy_error = False
@@ -117,42 +139,97 @@ def compute_and_save_action(
     used_fallback = False
     fallback_failed = False
     fallback_error_message: Optional[str] = None
+    load_bundle: Optional[SiteLoadBundle] = None
+    grid_stats: Optional[GridNetPowerStats] = None
 
     decision: Optional[PolicyDecision] = None
     was_corrected = False
     raw_decision: Optional[PolicyDecision] = None
     obs: Optional[np.ndarray] = None
+    feature_names: List[str] = []
 
     # ── Primary path: observation + assigned policy ──────────────────────────
     try:
-        obs = prepare_observation(
-            charger_id=charger_id,
-            is_fully_charged=is_fully_charged,
-            time_connection=tc_local,
-            time_current=ts_local,
-            forecasted_duration_hours=forecasted_duration_hours,
-            forecasted_energy_kwh=forecasted_energy_kwh,
-            current_power_kw=current_power_kw,
-            forecasted_energy_kwh_std=forecasted_energy_kwh_std,
-            forecasted_duration_hours_std=forecasted_duration_hours_std,
-            energy_delivered_kwh=energy_delivered_kwh,
-            community_load_kw=community_load_kw,
-            controlled_charging_points=controlled_charging_points,
-            probability_disconnection=prob_discon,
-            cumulative_duration_probability=cum_prob,
-        )
-        print(f'The observation for charger {charger_id} at {ts_local} (local) is: {obs}')
-        assert obs.shape == (OBSERVATION_SIZE,), (
-            f"Invalid observation shape {obs.shape}, expected ({OBSERVATION_SIZE},)"
-        )
-
         policy = get_policy(control_algorithm, control_policy_slug)
-        policy_context, context_warnings = policy.enrich_context(
+        feature_names = list(_observation_features_for_policy(policy))
+
+        load_bundle = fetch_site_load_for_features(
+            db, pilot_id, ts_utc, feature_names
+        )
+        context_warnings.extend(load_bundle.warnings)
+        if load_bundle.meta:
+            policy_context.setdefault("signal_meta", {})["site_load"] = load_bundle.meta
+
+        if features_need_grid_net_power(feature_names):
+            # Hard-fail (→ Default policy) when required measured stats are missing.
+            grid_stats = fetch_grid_net_power_stats(db, pilot_id, ts_utc)
+            policy_context["grid_net_power_max_kw"] = grid_stats.max_kw
+            policy_context["grid_net_power_q40_kw"] = grid_stats.q40_kw
+            policy_context["grid_net_power_q70_kw"] = grid_stats.q70_kw
+            policy_context.setdefault("signal_meta", {})["grid_net_power"] = {
+                "source": grid_stats.source,
+                "n_points": grid_stats.n_points,
+                "month_start": grid_stats.month_start.isoformat(),
+                "month_stop": grid_stats.month_stop.isoformat(),
+                "aggregate_every": grid_stats.aggregate_every,
+                "import_sensors": grid_stats.import_sensors,
+                "export_sensors": grid_stats.export_sensors,
+                "scale": grid_stats.scale,
+                "max_kw": grid_stats.max_kw,
+                "q40_kw": grid_stats.q40_kw,
+                "q70_kw": grid_stats.q70_kw,
+            }
+
+        nominal_for_obs = None if charger_max_kw == float("inf") else charger_max_kw
+
+        if feature_names:
+            obs = prepare_observation(
+                charger_id=charger_id,
+                is_fully_charged=is_fully_charged,
+                time_connection=tc_local,
+                time_current=ts_local,
+                forecasted_duration_hours=forecasted_duration_hours,
+                forecasted_energy_kwh=forecasted_energy_kwh,
+                current_power_kw=current_power_kw,
+                forecasted_energy_kwh_std=forecasted_energy_kwh_std,
+                forecasted_duration_hours_std=forecasted_duration_hours_std,
+                energy_delivered_kwh=energy_delivered_kwh,
+                controlled_charging_points=controlled_charging_points,
+                probability_disconnection=prob_discon,
+                cumulative_duration_probability=cum_prob,
+                feature_names=feature_names,
+                net_demand_kw=load_bundle.net.values_kw if load_bundle.net else None,
+                demand_kw=load_bundle.demand.values_kw if load_bundle.demand else None,
+                generation_kw=(
+                    load_bundle.generation.values_kw if load_bundle.generation else None
+                ),
+                nominal_power_kw=nominal_for_obs,
+                grid_net_power_max_kw=(
+                    grid_stats.max_kw if grid_stats is not None else None
+                ),
+                grid_net_power_q40_kw=(
+                    grid_stats.q40_kw if grid_stats is not None else None
+                ),
+                grid_net_power_q70_kw=(
+                    grid_stats.q70_kw if grid_stats is not None else None
+                ),
+            )
+            print(f'The observation for charger {charger_id} at {ts_local} (local) is: {obs}')
+        else:
+            # Rule-based: no ANN obs layout; decisions use policy_context only.
+            obs = np.array([], dtype=np.float32)
+            print(
+                f'No observation vector for charger {charger_id} at {ts_local} '
+                f'(rule-based policy; is_fully_charged={is_fully_charged})'
+            )
+
+        policy_context, enrich_warnings = policy.enrich_context(
             db,
             pilot_id=pilot_id,
             at_time=ts_utc,
             context=policy_context,
         )
+        context_warnings.extend(enrich_warnings)
         raw_decision = policy.compute_action(obs, context=policy_context)
         decision, was_corrected = apply_correction(
             decision=raw_decision,
@@ -161,7 +238,7 @@ def compute_and_save_action(
             charger_max_kw=charger_max_kw,
         )
     except Exception as primary_exc:
-        # Assigned policy (or observation build) failed — try the system default.
+        # Assigned policy (or observation / demand forecast) failed — try default.
         policy_error = True
         policy_error_message = str(primary_exc)[:2000]
         log_system_error(
@@ -178,7 +255,8 @@ def compute_and_save_action(
 
         # ── Fallback path: default rule-based policy ─────────────────────────
         try:
-            fallback_obs = obs if obs is not None else _minimal_obs_for_fallback(is_fully_charged)
+            # Default policy reads is_fully_charged from context, not from obs.
+            fallback_obs = obs if obs is not None else np.array([], dtype=np.float32)
             raw_decision = DefaultRuleBasedPolicy().compute_action(
                 fallback_obs, context=policy_context
             )
@@ -227,6 +305,9 @@ def compute_and_save_action(
         )
 
     # Snapshot of policy-variable inputs for debugging (actions.decision_context).
+    # signal_meta (e.g. wind_excess measurement value + timestamp + source) is
+    # kept as its own section rather than mixed into the flat scalar "inputs".
+    signal_meta = policy_context.pop("signal_meta", None) if isinstance(policy_context, dict) else None
     # float("inf") is not JSON-serializable — replace if the charger was missing.
     decision_context: Dict = {
         "inputs": {
@@ -236,6 +317,15 @@ def compute_and_save_action(
             ),
         }
     }
+    if signal_meta:
+        decision_context["signal_meta"] = signal_meta
+    if obs is not None:
+        # Snapshot of the vector actually passed to the (primary) policy.
+        # Rule-based policies use an empty vector; ANN uses the sidecar layout.
+        decision_context["observation"] = {
+            "features": list(feature_names),
+            "values": [float(x) for x in np.asarray(obs, dtype=np.float64).reshape(-1)],
+        }
     if context_warnings:
         decision_context["warnings"] = context_warnings
     if policy_error:
@@ -288,21 +378,20 @@ def compute_and_save_action(
 
     db.add(action_row)
 
-    # Persist load forecast
-    # -----------------------------
-    # Zip values with their pre-computed timestamps.  When no timestamp vector
-    # was supplied (e.g. tests), generate one on the spot as a safe fallback.
-    if forecast_timestamps is None:
-        step = timedelta(minutes=FORECAST_STEP_MINUTES)
-        forecast_timestamps = [ts_utc + i * step for i in range(len(community_load_kw))]
-    for value, ts in zip(community_load_kw, forecast_timestamps):
-        forecast_row = GridLoadForecasted(
-            id=uuid4(),
-            value=value,
-            forecast_timestamp=ts,
-            id_action=action_id,
-        )
-        db.add(forecast_row)
+    # Persist only the net (or demand) series that the policy actually used.
+    series_to_store = None
+    if load_bundle is not None:
+        series_to_store = load_bundle.net or load_bundle.demand
+    if series_to_store is not None:
+        for value, ts in zip(series_to_store.values_kw, series_to_store.timestamps):
+            db.add(
+                GridLoadForecasted(
+                    id=uuid4(),
+                    value=value,
+                    forecast_timestamp=ts,
+                    id_action=action_id,
+                )
+            )
 
     # NOTE: commit happens in endpoint
 
@@ -327,17 +416,6 @@ def compute_and_save_action(
             "Used the default rule-based policy instead."
         )
     return result
-
-
-def _minimal_obs_for_fallback(is_fully_charged: bool) -> np.ndarray:
-    """Build a tiny observation vector usable only by DefaultRuleBasedPolicy.
-
-    Used when ``prepare_observation`` itself failed, so we still have a chance
-    to apply the default charge-on-arrival rule from ``is_fully_charged``.
-    """
-    obs = np.zeros(OBSERVATION_SIZE, dtype=float)
-    obs[OBS_FULLY_CHARGED] = 1.0 if is_fully_charged else 0.0
-    return obs
 
 
 # ── Retrospective real-action helpers ─────────────────────────────────────────

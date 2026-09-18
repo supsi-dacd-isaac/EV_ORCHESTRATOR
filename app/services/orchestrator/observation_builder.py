@@ -1,14 +1,16 @@
 """Build and assemble observation vectors from the named feature catalog.
 
-Phase 1: ``prepare_observation`` still returns the default full vector (same
-order/size as before). Internally it builds a feature bank then assembles by
-``DEFAULT_OBSERVATION_FEATURES``. Phase 2 will assemble subsets for ANN sidecars.
+``prepare_observation`` returns the default full vector by default. Internally
+it builds a feature bank then assembles by ``DEFAULT_OBSERVATION_FEATURES``.
+ANN sidecars can pass a subset of names; names that are not in the default
+layout (e.g. ``demand_forecast`` alone) require those series to be present in
+the feature bank (wired when the forecasters are connected in a later step).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Mapping, Sequence, Union
+from typing import Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -17,6 +19,7 @@ from app.services.orchestrator.constants import (
     DURATION_95Q,
     CHARGING_RATE_CONSTANT,
     NUMBER_CHARGING_POINTS_CONSTANT,
+    GRID_NET_POWER_NORM_EPS_KW,
 )
 from app.services.orchestrator.obs_layout import (
     DEFAULT_FEATURE_START,
@@ -25,6 +28,35 @@ from app.services.orchestrator.obs_layout import (
     OBSERVATION_SIZE,
     validate_feature_names,
 )
+
+
+def _normalize_forecast_series(values_kw) -> tuple[np.ndarray, np.ndarray]:
+    """Return (raw_kw float64, normalized float32) for a forecast horizon series.
+
+    Shared by net / demand / generation so all three catalog features are scaled
+    the same way (z-score, clipped to [-5, 5]).
+    """
+    raw = np.asarray(values_kw, dtype=np.float64).reshape(-1)
+    mean = float(np.mean(raw))
+    std = max(float(np.std(raw)), 1e-6)
+    normalized = np.clip((raw - mean) / std, -5, 5).astype(np.float32)
+    return raw, normalized
+
+
+def _normalize_grid_net_power_kw(
+    raw_kw: float,
+    *,
+    controlled_charging_points: int,
+    current_power_kw: float,
+    nominal_power_kw: Optional[float],
+) -> float:
+    """Divide measured kW by max(n_points × rate, ε); rate prefers current power."""
+    rate = float(current_power_kw) if current_power_kw and current_power_kw > 0 else 0.0
+    if rate <= 0 and nominal_power_kw is not None and nominal_power_kw > 0:
+        rate = float(nominal_power_kw)
+    n_points = max(int(controlled_charging_points), 0)
+    denom = max(n_points * rate, GRID_NET_POWER_NORM_EPS_KW)
+    return float(raw_kw) / denom
 
 
 def build_observation_features(
@@ -38,33 +70,33 @@ def build_observation_features(
     forecasted_energy_kwh_std: float,
     forecasted_duration_hours_std: float,
     energy_delivered_kwh: float,
-    community_load_kw,
     controlled_charging_points: int,
     probability_disconnection: float,
     cumulative_duration_probability: float,
+    net_demand_kw: Optional[object] = None,
+    demand_kw: Optional[object] = None,
+    generation_kw: Optional[object] = None,
+    nominal_power_kw: Optional[float] = None,
+    grid_net_power_max_kw: Optional[float] = None,
+    grid_net_power_q40_kw: Optional[float] = None,
+    grid_net_power_q70_kw: Optional[float] = None,
 ) -> Dict[str, np.ndarray]:
-    """Compute every catalog feature as a 1-D float array.
+    """Compute catalog features as 1-D float arrays.
 
-    ``charger_id`` is accepted for API symmetry with callers; features today do
-    not branch on it. Returns a dict keyed by feature name (see ``obs_layout``).
+    Load series are optional: pass them only when the assembled feature list
+    needs ``net_demand_forecast`` / ``demand_forecast`` / ``generation_forecast``
+    (or ``load_level_relative``, which uses the first net step).
+
+    Measured grid net-power stats are optional raw kW values; when
+    present they are normalized by ``n_charging_points × rate``.
     """
     _ = charger_id  # reserved for charger-specific features later
 
     time_connection_hour = time_connection.hour
     time_current_hour = time_current.hour
     time_current_month = time_current.month
-    # Both timestamps are pilot-local (or UTC-aware) after orchestrator normalization.
     connected_time_hours = (time_current - time_connection).total_seconds() / 3600
     max_possible_energy = forecasted_duration_hours * current_power_kw
-    community_load = np.asarray(community_load_kw, dtype=np.float64).reshape(-1)
-    community_load_kw_mean = float(np.mean(community_load))
-    community_load_kw_std = max(float(np.std(community_load)), 1e-6)
-
-    community_load_normalized = np.clip(
-        (community_load - community_load_kw_mean) / community_load_kw_std,
-        -5,
-        5,
-    ).astype(np.float32)
 
     features: Dict[str, np.ndarray] = {
         "vehicle_connected": _f(1),
@@ -102,11 +134,49 @@ def build_observation_features(
         "num_charging_points_norm": _f(
             controlled_charging_points / NUMBER_CHARGING_POINTS_CONSTANT
         ),
-        "load_level_relative": _f(
-            (controlled_charging_points * current_power_kw) / community_load[0]
-        ),
-        "community_load": community_load_normalized,
     }
+
+    if net_demand_kw is not None:
+        net_raw, net_normalized = _normalize_forecast_series(net_demand_kw)
+        features["load_level_relative"] = _f(
+            (controlled_charging_points * current_power_kw) / net_raw[0]
+        )
+        features["net_demand_forecast"] = net_normalized
+
+    if demand_kw is not None:
+        _, demand_normalized = _normalize_forecast_series(demand_kw)
+        features["demand_forecast"] = demand_normalized
+    if generation_kw is not None:
+        _, gen_normalized = _normalize_forecast_series(generation_kw)
+        features["generation_forecast"] = gen_normalized
+
+    if grid_net_power_max_kw is not None:
+        features["grid_net_power_max_month"] = _f(
+            _normalize_grid_net_power_kw(
+                grid_net_power_max_kw,
+                controlled_charging_points=controlled_charging_points,
+                current_power_kw=current_power_kw,
+                nominal_power_kw=nominal_power_kw,
+            )
+        )
+    if grid_net_power_q40_kw is not None:
+        features["grid_net_power_q40_month"] = _f(
+            _normalize_grid_net_power_kw(
+                grid_net_power_q40_kw,
+                controlled_charging_points=controlled_charging_points,
+                current_power_kw=current_power_kw,
+                nominal_power_kw=nominal_power_kw,
+            )
+        )
+    if grid_net_power_q70_kw is not None:
+        features["grid_net_power_q70_month"] = _f(
+            _normalize_grid_net_power_kw(
+                grid_net_power_q70_kw,
+                controlled_charging_points=controlled_charging_points,
+                current_power_kw=current_power_kw,
+                nominal_power_kw=nominal_power_kw,
+            )
+        )
 
     for name, values in features.items():
         expected = FEATURES[name].size
@@ -150,8 +220,9 @@ def select_observation_from_default(
 ) -> np.ndarray:
     """Select and reorder slices from a default-layout full observation vector.
 
-    The orchestrator still builds the historical full vector; ANN policies use
-    this to assemble the subset declared in their sidecar.
+    Only features present in ``DEFAULT_OBSERVATION_FEATURES`` can be selected
+    this way (e.g. ``net_demand_forecast``). Extra catalog features such as
+    ``demand_forecast`` must be assembled from the feature bank instead.
     """
     obs = np.asarray(full_obs, dtype=np.float32).reshape(-1)
     if obs.shape != (OBSERVATION_SIZE,):
@@ -165,6 +236,11 @@ def select_observation_from_default(
 
     parts = []
     for name in feature_names:
+        if name not in DEFAULT_FEATURE_START:
+            raise KeyError(
+                f"Feature {name!r} is not in the default observation layout; "
+                f"assemble it from the feature bank instead of slicing the default vector."
+            )
         start = DEFAULT_FEATURE_START[name]
         size = FEATURES[name].size
         parts.append(obs[start : start + size])
@@ -182,17 +258,19 @@ def prepare_observation(
     forecasted_energy_kwh_std: float,
     forecasted_duration_hours_std: float,
     energy_delivered_kwh: float,
-    community_load_kw,
     controlled_charging_points: int,
     probability_disconnection: float,
     cumulative_duration_probability: float,
     feature_names: Sequence[str] = DEFAULT_OBSERVATION_FEATURES,
+    net_demand_kw: Optional[object] = None,
+    demand_kw: Optional[object] = None,
+    generation_kw: Optional[object] = None,
+    nominal_power_kw: Optional[float] = None,
+    grid_net_power_max_kw: Optional[float] = None,
+    grid_net_power_q40_kw: Optional[float] = None,
+    grid_net_power_q70_kw: Optional[float] = None,
 ) -> np.ndarray:
-    """Build an observation vector.
-
-    By default returns the historical full layout (``OBSERVATION_SIZE``).
-    Pass ``feature_names`` to assemble a subset / reordering (Phase 2 ANN path).
-    """
+    """Build an observation vector (default = historical 44-dim layout)."""
     features = build_observation_features(
         charger_id=charger_id,
         is_fully_charged=is_fully_charged,
@@ -204,10 +282,16 @@ def prepare_observation(
         forecasted_energy_kwh_std=forecasted_energy_kwh_std,
         forecasted_duration_hours_std=forecasted_duration_hours_std,
         energy_delivered_kwh=energy_delivered_kwh,
-        community_load_kw=community_load_kw,
         controlled_charging_points=controlled_charging_points,
         probability_disconnection=probability_disconnection,
         cumulative_duration_probability=cumulative_duration_probability,
+        net_demand_kw=net_demand_kw,
+        demand_kw=demand_kw,
+        generation_kw=generation_kw,
+        nominal_power_kw=nominal_power_kw,
+        grid_net_power_max_kw=grid_net_power_max_kw,
+        grid_net_power_q40_kw=grid_net_power_q40_kw,
+        grid_net_power_q70_kw=grid_net_power_q70_kw,
     )
     return assemble_observation(features, feature_names)
 
@@ -216,7 +300,6 @@ def _f(x: Union[float, int, np.floating, np.integer]) -> np.ndarray:
     return np.array([x], dtype=np.float32)
 
 
-# Re-export so callers can take size from the builder module if preferred.
 __all__ = [
     "assemble_observation",
     "build_observation_features",

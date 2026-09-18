@@ -9,7 +9,6 @@ from app.db.session import SessionLocal
 from app.models import Chargers, ChargingSessions, Actions, Pilot, Owners
 
 from app.services.ev_forecast.query import get_ev_forecast
-from app.services.load_forecast.load_forecaster_service import forecast_load
 from app.services.orchestrator.orchestrator_service import compute_and_save_action, finalize_session_action
 from app.services.ev_forecast.updater import update_ev_forecast
 from app.services.orchestrator.duration_cdf.updater import update_ev_duration_cdf
@@ -54,6 +53,7 @@ def _validate_event_ordering(
     *,
     event_label: str,
     require_strictly_after: bool,
+    display_tz=None,
 ) -> None:
     """Reject out-of-order events using the session's own timeline (Change 2).
 
@@ -70,15 +70,22 @@ def _validate_event_ordering(
       reject events that rewind before the last recorded event; an equal
       timestamp is tolerated because no new time has actually elapsed.
 
+    ``display_tz`` (optional): request timestamp tzinfo / IANA name so error
+    messages match the caller's offset (e.g. +02:00) instead of always UTC.
+
     Raises HTTPException 400 without mutating the session on rejection.
     """
+
+    def _fmt(dt: datetime) -> str:
+        return to_response_tz(dt, display_tz).isoformat()
+
     start = session.start_time
     if start is not None and event_ts_utc < start:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{event_label} timestamp {event_ts_utc.isoformat()} is before the "
-                f"session connection time {start.isoformat()}."
+                f"{event_label} timestamp {_fmt(event_ts_utc)} is before the "
+                f"session connection time {_fmt(start)}."
             ),
         )
 
@@ -88,16 +95,16 @@ def _validate_event_ordering(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"{event_label} timestamp {event_ts_utc.isoformat()} must be "
-                    f"strictly after the last recorded event time {last.isoformat()}."
+                    f"{event_label} timestamp {_fmt(event_ts_utc)} must be "
+                    f"strictly after the last recorded event time {_fmt(last)}."
                 ),
             )
         if not require_strictly_after and event_ts_utc < last:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"{event_label} timestamp {event_ts_utc.isoformat()} is before the "
-                    f"last recorded event time {last.isoformat()}."
+                    f"{event_label} timestamp {_fmt(event_ts_utc)} is before the "
+                    f"last recorded event time {_fmt(last)}."
                 ),
             )
 
@@ -142,13 +149,6 @@ def vehicle_connected(
             .first()
         )
 
-        # 2. Call load forecaster
-        community_load_kw, forecast_timestamps = forecast_load(
-            db=db,
-            pilot_id=pilot.id if pilot else None,
-            event_time=event.timestamp,
-        )
-
         if existing_session:
             # Active session found: compute action based on existing session and send warning
 
@@ -160,6 +160,7 @@ def vehicle_connected(
                 event_ts_utc,
                 event_label="vehicle_connected",
                 require_strictly_after=False,
+                display_tz=event.timestamp.tzinfo,
             )
 
             current_power_kw = event.measured_power_kw
@@ -182,13 +183,11 @@ def vehicle_connected(
                     forecasted_energy_kwh=existing_session.forecasted_energy_kwh,
                     forecasted_duration_hours=existing_session.forecasted_duration_hours,
                     energy_delivered_kwh=energy_delivered_kwh,
-                    community_load_kw=community_load_kw,
                     is_fully_charged=is_fully_charged,
                     controlled_charging_points=existing_session.controlled_charging_points,
                     time_connection=existing_session.start_time,
                     forecasted_energy_kwh_std=existing_session.forecasted_energy_kwh_std,
                     forecasted_duration_hours_std=existing_session.forecasted_duration_hours_std,
-                    forecast_timestamps=forecast_timestamps,
                 )
                 db.commit()
             except Exception as exc:
@@ -264,13 +263,11 @@ def vehicle_connected(
                 forecasted_energy_kwh=new_session.forecasted_energy_kwh,
                 forecasted_duration_hours=new_session.forecasted_duration_hours,
                 energy_delivered_kwh=new_session.energy_delivered_kwh,
-                community_load_kw=community_load_kw,
                 is_fully_charged=event.is_fully_charged,
                 controlled_charging_points=new_session.controlled_charging_points,
                 time_connection=new_session.start_time,
                 forecasted_energy_kwh_std=new_session.forecasted_energy_kwh_std,
                 forecasted_duration_hours_std=new_session.forecasted_duration_hours_std,
-                forecast_timestamps=forecast_timestamps,
             )
             db.commit()
         except Exception as exc:
@@ -351,12 +348,16 @@ def charging_update(
             event_ts_utc,
             event_label="charging_update",
             require_strictly_after=True,
+            display_tz=event.timestamp.tzinfo,
         )
 
         session.energy_delivered_kwh += event.energy_delivered_kwh
         # session.avg_measured_power_kw = event.avg_power_last_15min_kw
         session.is_fully_charged = event.is_fully_charged
-        if session.is_fully_charged == True or event.avg_power_last_15min_kw < 0.01:
+        # end_charging_time = vehicle no longer needs energy (fully charged).
+        # Do not use low measured power: policy pauses would look like "done".
+        # If never reported full, vehicle_disconnected sets it to end_time.
+        if event.is_fully_charged:
             session.end_charging_time = to_utc(event.timestamp, local_tz=pilot_tz_name)
         # Advance the timeline; persisted by the telemetry commit below.
         session.last_event_time = event_ts_utc
@@ -366,15 +367,8 @@ def charging_update(
         db.commit()
         db.refresh(session)
 
-        # 3. Call load forecaster
-        community_load_kw, forecast_timestamps = forecast_load(
-            db=db,
-            pilot_id=pilot.id if pilot else None,
-            event_time=event.timestamp,
-        )
-
-        # 4. Call orchestrator (policy failures return an action dict; this
-        # try/except only protects the already-committed telemetry).
+        # Decision step (site load is fetched inside compute_and_save_action only
+        # when the assigned policy's observation features need it).
         try:
             action = compute_and_save_action(
                 db=db,
@@ -385,13 +379,11 @@ def charging_update(
                 forecasted_energy_kwh=session.forecasted_energy_kwh,
                 forecasted_duration_hours=session.forecasted_duration_hours,
                 energy_delivered_kwh=session.energy_delivered_kwh,
-                community_load_kw=community_load_kw,
                 is_fully_charged=event.is_fully_charged,
                 controlled_charging_points=session.controlled_charging_points,
                 time_connection = session.start_time,
                 forecasted_energy_kwh_std = session.forecasted_energy_kwh_std,
                 forecasted_duration_hours_std = session.forecasted_duration_hours_std,
-                forecast_timestamps=forecast_timestamps,
             )
             db.commit()
         except Exception as exc:
@@ -462,6 +454,7 @@ def vehicle_disconnected(
             event_ts_utc,
             event_label="vehicle_disconnected",
             require_strictly_after=True,
+            display_tz=event.timestamp.tzinfo,
         )
 
         session.energy_delivered_kwh = session.energy_delivered_kwh + event.energy_delivered_kwh

@@ -2,7 +2,7 @@ from typing import Optional
 import datetime
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, String, UniqueConstraint, Uuid, text
+from sqlalchemy import Boolean, DateTime, Double, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -42,11 +42,13 @@ class Pilot(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     id_owner: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     timezone_name: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'Europe/Zurich'"))
-    forecast_meter: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    forecast_site: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # How/where to query policy-specific external signals (e.g. wind_excess).
     # Live per-timestep values are stored on actions.decision_context, not here.
     policy_signals: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Named registry of NON-secret external connections (InfluxDB, forecast API,
+    # ...). policy_signals entries reference an entry here by name via "source".
+    # Credentials for these connections live encrypted in pilot_secret, not here.
+    data_sources: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     owners: Mapped['Owners'] = relationship('Owners', back_populates='pilot')
     chargers: Mapped[list['Chargers']] = relationship('Chargers', back_populates='pilot')
@@ -54,6 +56,33 @@ class Pilot(Base):
         'EvPilotForecastTimeseries', back_populates='pilot', foreign_keys='EvPilotForecastTimeseries.id_pilot'
     )
     forecast_jobs: Mapped[list['ForecastJobDB']] = relationship('ForecastJobDB', back_populates='pilot')
+    secrets: Mapped[list['PilotSecret']] = relationship(
+        'PilotSecret', back_populates='pilot', cascade='all, delete-orphan'
+    )
+
+
+class PilotSecret(Base):
+    """Encrypted credential for one of a pilot's data_sources connections.
+
+    One row per (pilot, name). `ciphertext` is a Fernet token produced by
+    app.services.common.secrets; the plaintext value is never stored here and
+    is never returned by the API — it can only be overwritten (rotated).
+    """
+    __tablename__ = 'pilot_secret'
+    __table_args__ = (
+        ForeignKeyConstraint(['id_pilot'], ['pilot.id'], ondelete='CASCADE', onupdate='CASCADE', name='pilot_secret_pilot_fkey'),
+        PrimaryKeyConstraint('id', name='pilot_secret_pkey'),
+        UniqueConstraint('id_pilot', 'name', name='pilot_secret_pilot_name_key'),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    id_pilot: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text('now()'))
+
+    pilot: Mapped['Pilot'] = relationship('Pilot', back_populates='secrets')
 
 
 class Chargers(Base):

@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from uuid import UUID, uuid4
 from datetime import datetime
+import re
 
 from app.db.session import SessionLocal
-from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats, Pilot, GridLoadForecasted, ForecastJobDB
+from app.models import Owners, Chargers, ChargingSessions, Actions, EvDurationCdf, EvForecastStats, Pilot, PilotSecret, GridLoadForecasted, ForecastJobDB
 from app.schemas.database import (
     OwnersCreate, OwnersUpdate, OwnersRead,
     ChargersCreate, ChargersUpdate, ChargersRead,
@@ -11,11 +12,30 @@ from app.schemas.database import (
     ActionsCreate, ActionsUpdate, ActionsRead,
     EvDurationCdfCreate, EvDurationCdfUpdate, EvDurationCdfRead,
     EvForecastStatsCreate, EvForecastStatsUpdate, EvForecastStatsRead,
-    PilotCreate, PilotUpdate, PilotRead,
+    PilotCreate, PilotUpdate, PilotRead, PilotSecretSet, PilotSecretRead,
     GridLoadForecastedCreate, GridLoadForecastedUpdate, GridLoadForecastedRead,
     ForecastJobCreate, ForecastJobUpdate, ForecastJobRead,
 )
 from app.services.common.auth import TokenData, get_current_user, hash_password
+from app.services.common.secrets import SecretsConfigError, SecretDecryptError
+from app.services.common.pilot_secrets import (
+    set_pilot_secret,
+    list_pilot_secrets,
+    delete_pilot_secret,
+)
+from app.services.orchestrator.signals.data_sources import (
+    resolve_connection,
+    resolve_connection_token,
+    validate_data_sources,
+)
+from app.services.orchestrator.signals.influx_client import (
+    check_connection,
+    InfluxQueryError,
+)
+from app.services.orchestrator.signals.rest_client import (
+    RestClientError,
+    check_rest_reachable,
+)
 from app.services.common.authorization import (
     ensure_action_access,
     ensure_charger_access,
@@ -331,6 +351,29 @@ def delete_session(session_id: UUID, current_user: TokenData = Depends(get_curre
 
 
 # ---------- Pilot ----------
+def _require_valid_data_sources(data_sources) -> None:
+    """Allowlist connection keys; convert ValueError to HTTP 400."""
+    try:
+        validate_data_sources(data_sources)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _can_see_data_sources(current_user: TokenData, pilot: Pilot) -> bool:
+    """Admin, or the owner of this pilot. Everyone else must not see data_sources."""
+    if is_admin(current_user):
+        return True
+    return current_user.owner_id is not None and current_user.owner_id == pilot.id_owner
+
+
+def _pilot_read_for_user(pilot: Pilot, current_user: TokenData) -> PilotRead:
+    """Serialize a pilot; hide data_sources unless the caller is admin/owner."""
+    read = PilotRead.model_validate(pilot)
+    if not _can_see_data_sources(current_user, pilot):
+        read.data_sources = None
+    return read
+
+
 @router.post("/pilots")
 def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
@@ -339,14 +382,14 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
             require_roles(current_user, "user-adv")
             if payload.id_owner != current_user.owner_id:
                 raise HTTPException(status_code=403, detail="Forbidden - you can only create pilots for your own owner ID")
+        _require_valid_data_sources(payload.data_sources)
         obj = Pilot(
             id=uuid4(),
             name=payload.name,
             id_owner=payload.id_owner,
             timezone_name=payload.timezone_name,
-            forecast_meter=payload.forecast_meter,
-            forecast_site=payload.forecast_site,
             policy_signals=payload.policy_signals,
+            data_sources=payload.data_sources,
         )
         db.add(obj)
         db.flush()  # get obj.id before creating the job
@@ -374,15 +417,6 @@ def create_pilot(payload: PilotCreate, current_user: TokenData = Depends(get_cur
         db.refresh(obj)
 
         result = PilotRead.model_validate(obj).model_dump()
-
-        missing = [f for f in ("forecast_meter", "forecast_site") if not getattr(payload, f)]
-        if missing:
-            result["warning"] = (
-                f"Pilot created without {' and '.join(missing)}. "
-                "Load forecast will fall back to a constant value — "
-                "this does not allow any control that helps prevent grid congestion."
-            )
-
         return result
     finally:
         db.close()
@@ -393,7 +427,7 @@ def list_pilots(current_user: TokenData = Depends(get_current_user)):
     db = SessionLocal()
     try:
         require_roles(current_user, "admin", "user", "guest")
-        return db.query(Pilot).all()
+        return [_pilot_read_for_user(p, current_user) for p in db.query(Pilot).all()]
     finally:
         db.close()
 
@@ -406,7 +440,7 @@ def get_pilot(pilot_id: UUID, current_user: TokenData = Depends(get_current_user
         obj = db.query(Pilot).filter(Pilot.id == pilot_id).first()
         if not obj:
             raise HTTPException(status_code=404, detail="Pilot not found")
-        return obj
+        return _pilot_read_for_user(obj, current_user)
     finally:
         db.close()
 
@@ -429,11 +463,179 @@ def update_pilot(
         )
 
         data = payload.dict(exclude_unset=True)
+        if "data_sources" in data:
+            _require_valid_data_sources(data["data_sources"])
         for k, v in data.items():
             setattr(obj, k, v)
         db.commit()
         db.refresh(obj)
         return obj
+    finally:
+        db.close()
+
+
+# ---------- Pilot secrets (encrypted tokens/keys for data_sources) ----------
+# Access: admin OR the pilot's owner (user-adv). Secret VALUES are never
+# returned by any endpoint — they can only be set/rotated or deleted.
+_SECRET_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def _validate_secret_name(name: str) -> None:
+    if not _SECRET_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid secret name; allowed: letters, digits, '_', '-', '.' (max 100 chars).",
+        )
+
+
+@router.put("/pilots/{pilot_id}/secrets/{name}", response_model=PilotSecretRead)
+def set_pilot_secret_endpoint(
+    pilot_id: UUID,
+    name: str,
+    payload: PilotSecretSet,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Create or rotate an encrypted secret for a pilot's data source."""
+    db = SessionLocal()
+    try:
+        ensure_pilot_access(
+            db, current_user, pilot_id,
+            allow_user=True, allow_guest=False, require_user_ownership=True,
+        )
+        _validate_secret_name(name)
+        if not payload.value:
+            raise HTTPException(status_code=400, detail="Secret value must not be empty.")
+        try:
+            row = set_pilot_secret(db, pilot_id, name, payload.value)
+        except SecretsConfigError as exc:
+            # Master key missing/invalid: cannot encrypt. 503 = service misconfigured.
+            raise HTTPException(status_code=503, detail=str(exc))
+        db.commit()
+        db.refresh(row)
+        return row
+    finally:
+        db.close()
+
+
+@router.get("/pilots/{pilot_id}/secrets", response_model=list[PilotSecretRead])
+def list_pilot_secrets_endpoint(
+    pilot_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """List the names + timestamps of a pilot's secrets (never the values)."""
+    db = SessionLocal()
+    try:
+        ensure_pilot_access(
+            db, current_user, pilot_id,
+            allow_user=True, allow_guest=False, require_user_ownership=True,
+        )
+        return list_pilot_secrets(db, pilot_id)
+    finally:
+        db.close()
+
+
+@router.delete("/pilots/{pilot_id}/secrets/{name}")
+def delete_pilot_secret_endpoint(
+    pilot_id: UUID,
+    name: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Delete a pilot secret."""
+    db = SessionLocal()
+    try:
+        ensure_pilot_access(
+            db, current_user, pilot_id,
+            allow_user=True, allow_guest=False, require_user_ownership=True,
+        )
+        _validate_secret_name(name)
+        removed = delete_pilot_secret(db, pilot_id, name)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Secret not found")
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.post("/pilots/{pilot_id}/data_sources/{name}/test")
+def test_pilot_data_source_endpoint(
+    pilot_id: UUID,
+    name: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Live-check a pilot's data-source connection (never returns the token)."""
+    db = SessionLocal()
+    try:
+        pilot = ensure_pilot_access(
+            db, current_user, pilot_id,
+            allow_user=True, allow_guest=False, require_user_ownership=True,
+        )
+        connection = resolve_connection(pilot, name)
+        if connection is None:
+            raise HTTPException(status_code=404, detail=f"No data source named {name!r}")
+
+        conn_type = connection.get("type")
+        if conn_type == "influxdb":
+            if not connection.get("url"):
+                raise HTTPException(status_code=400, detail="Connection has no 'url'.")
+
+            try:
+                token = resolve_connection_token(db, pilot, connection)
+            except (SecretsConfigError, SecretDecryptError) as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            if not token:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "No usable token (missing 'token_secret' or the secret "
+                        "is not set)."
+                    ),
+                )
+
+            try:
+                check_connection(
+                    url=connection.get("url"),
+                    org=connection.get("org"),
+                    token=token,
+                )
+            except InfluxQueryError as exc:
+                return {"ok": False, "detail": str(exc)}
+            return {"ok": True, "detail": "Connection successful"}
+
+        if conn_type == "rest_api":
+            if not connection.get("base_url"):
+                raise HTTPException(status_code=400, detail="Connection has no 'base_url'.")
+
+            try:
+                token = resolve_connection_token(db, pilot, connection)
+            except (SecretsConfigError, SecretDecryptError) as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            if not token:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "No usable token (missing 'auth_secret' or the secret "
+                        "is not set)."
+                    ),
+                )
+
+            try:
+                check_rest_reachable(
+                    base_url=connection.get("base_url"),
+                    token=token,
+                    auth=connection.get("auth"),
+                )
+            except RestClientError as exc:
+                return {"ok": False, "detail": str(exc)}
+            return {"ok": True, "detail": "Connection reachable"}
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Connection type {conn_type!r} is not testable yet "
+                "(supported: 'influxdb', 'rest_api')."
+            ),
+        )
     finally:
         db.close()
 

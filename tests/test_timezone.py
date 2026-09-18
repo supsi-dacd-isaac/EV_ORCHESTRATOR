@@ -249,6 +249,63 @@ def test_two_chargers_same_local_hour_different_utc():
     assert lh_a == lh_b  # both map to the same local_hour bucket in generic stats
 
 
+def test_naive_connect_timestamp_same_generic_hour_london_zurich():
+    """Naive API timestamp = pilot-local wall clock (same rule as to_utc for sessions).
+
+    Both cities send \"2026-09-17T08:09:50\" with no offset → both use generic local_hour=8.
+    """
+    from app.services.common.db_utils import get_local_hour, to_utc
+
+    naive = datetime(2026, 9, 17, 8, 9, 50)  # no tzinfo
+    london_hour = get_local_hour(to_utc(naive, local_tz="Europe/London"), "Europe/London")
+    zurich_hour = get_local_hour(to_utc(naive, local_tz="Europe/Zurich"), "Europe/Zurich")
+    assert london_hour == 8
+    assert zurich_hour == 8
+    assert london_hour == zurich_hour
+
+
+def test_get_ev_forecast_naive_timestamp_queries_generic_hour_8():
+    """get_ev_forecast must use pilot-local naive handling when falling back to generic."""
+    from unittest.mock import MagicMock, patch
+    from app.services.ev_forecast import query as forecast_query
+
+    captured_hours = []
+
+    class _FakeQuery:
+        def filter(self, *args, **kwargs):
+            for arg in args:
+                try:
+                    if getattr(arg.left, "key", None) == "local_hour":
+                        captured_hours.append(arg.right.value)
+                except Exception:
+                    pass
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    fake_session = MagicMock()
+    fake_session.query.return_value = _FakeQuery()
+    fake_session.close = MagicMock()
+
+    naive = datetime(2026, 9, 17, 8, 9, 50)
+    with patch.object(forecast_query, "SessionLocal", return_value=fake_session), patch.object(
+        forecast_query,
+        "get_pilot_tz_for_charger",
+        side_effect=lambda db, charger_id: (
+            "Europe/London" if charger_id == "charger-london" else "Europe/Zurich"
+        ),
+    ):
+        forecast_query.get_ev_forecast("charger-london", naive)
+        forecast_query.get_ev_forecast("charger-zurich", naive)
+
+    assert captured_hours
+    assert all(h == 8 for h in captured_hours)
+
+
 def test_generic_charger_session_filter_uses_per_charger_tz():
     """
     Acceptance criterion 27+28:

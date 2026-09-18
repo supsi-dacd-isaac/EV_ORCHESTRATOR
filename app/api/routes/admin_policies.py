@@ -185,7 +185,7 @@ def get_observation_features(
                 "time_curr_cos",
                 "connected_time_relative",
                 "energy_charged_rel_needed",
-                "community_load",
+                "net_demand_forecast",
             ],
             "power_levels_kw": None,
         },
@@ -199,8 +199,12 @@ def get_observation_features(
             "1+1+1+1+1+24 = 29, so the ANN input dim must be 29.",
             "The assembled length (sum of feature sizes) must equal the ANN "
             "model's input dimension.",
-            "community_load is a vector whose size equals "
-            "BASELOAD_FORECAST_HORIZON_STEPS.",
+            "net_demand_forecast is a vector whose size equals "
+            "BASELOAD_FORECAST_HORIZON_STEPS (demand − generation; equals demand "
+            "when generation is unavailable).",
+            "demand_forecast and generation_forecast are optional catalog features "
+            "for policies that need them separately; they are not in the default "
+            "44-dim layout.",
             "Upload models with POST /admin/policies/ann/upload (sidecar required; "
             "basename must match, e.g. my_model.pth + my_model.json).",
         ],

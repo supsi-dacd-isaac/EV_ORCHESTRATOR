@@ -9,8 +9,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.services.orchestrator.policy.base_policy import BasePolicy, PolicyDecision
-from app.services.orchestrator.obs_layout import OBS_FULLY_CHARGED
-from app.services.orchestrator.signals.wind_excess import get_wind_excess_kw
+from app.services.orchestrator.signals.wind_excess import get_wind_excess_reading
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +32,9 @@ class WindMaxPolicy(BasePolicy):
       5. Otherwise                        → idle
 
     ``enrich_context`` loads wind_excess_kw from the pilot's policy_signals /
-    external DB (placeholder). ``e_median_kwh`` is still approximated with
-    forecasted mean energy until a dedicated median query exists.
+    external DB. Session scalars (including ``is_fully_charged``) come from
+    ``context``. ``e_median_kwh`` is still approximated with forecasted mean
+    energy until a dedicated median query exists.
     """
 
     def enrich_context(
@@ -46,17 +46,29 @@ class WindMaxPolicy(BasePolicy):
         context: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], List[str]]:
         warnings: List[str] = []
-        wind_excess_kw = get_wind_excess_kw(db, pilot_id, at_time)
-        if wind_excess_kw is None:
-            wind_excess_kw = 0.0
+        reading = get_wind_excess_reading(db, pilot_id, at_time)
+        if reading is None:
             warning = (
                 f"wind_excess not available for pilot {pilot_id} "
-                "(missing policy_signals.wind_excess config or external query "
-                "not implemented / failed); using 0.0"
+                "(missing policy_signals.wind_excess config, no recent data, or "
+                "the external query failed); using 0.0"
             )
             warnings.append(warning)
             logger.warning(warning)
-        context = {**context, "wind_excess_kw": wind_excess_kw}
+            context = {**context, "wind_excess_kw": 0.0}
+            return context, warnings
+
+        # Record both the value used and where/when it came from, so the
+        # decision is fully auditable in actions.decision_context.signal_meta.
+        signal_meta = dict(context.get("signal_meta") or {})
+        signal_meta["wind_excess"] = {
+            "source": reading.source,
+            "measured_at": reading.measured_at.isoformat() if reading.measured_at else None,
+            "raw_value_w": reading.raw_value_w,
+            "scale": reading.scale,
+            "value_kw": reading.value_kw,
+        }
+        context = {**context, "wind_excess_kw": reading.value_kw, "signal_meta": signal_meta}
         return context, warnings
 
     def compute_action(
@@ -64,10 +76,11 @@ class WindMaxPolicy(BasePolicy):
         obs: np.ndarray,
         context: Optional[Dict[str, Any]] = None,
     ) -> PolicyDecision:
-        if bool(obs[OBS_FULLY_CHARGED]):
+        _ = obs  # rule-based: decisions come from context, not the ANN layout
+        context = context or {}
+        if bool(context.get("is_fully_charged")):
             return PolicyDecision(action="not_charge", suggested_power_kw=None)
 
-        context = context or {}
         nominal_power_kw: float = context.get("nominal_power_kw", 0.0)
         energy_delivered_kwh: float = context.get("energy_delivered_kwh", 0.0)
         connected_hours: float = context.get("connected_time_hours", 0.0)

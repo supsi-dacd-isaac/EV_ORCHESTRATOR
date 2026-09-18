@@ -48,7 +48,7 @@ def _sample_prepare_kwargs():
         forecasted_energy_kwh_std=2.0,
         forecasted_duration_hours_std=0.5,
         energy_delivered_kwh=5.0,
-        community_load_kw=[10.0 + 0.1 * i for i in range(24)],
+        net_demand_kw=[10.0 + 0.1 * i for i in range(24)],
         controlled_charging_points=3,
         probability_disconnection=0.1,
         cumulative_duration_probability=0.2,
@@ -63,6 +63,8 @@ class ObservationCatalogTests(unittest.TestCase):
             sum(FEATURES[n].size for n in DEFAULT_OBSERVATION_FEATURES),
             44,
         )
+        self.assertIn("net_demand_forecast", DEFAULT_OBSERVATION_FEATURES)
+        self.assertNotIn("community_load", FEATURES)
 
     def test_prepare_observation_default_shape(self):
         obs = prepare_observation(**_sample_prepare_kwargs())
@@ -77,11 +79,17 @@ class ObservationCatalogTests(unittest.TestCase):
             "time_curr_cos",
             "connected_time_relative",
             "energy_charged_rel_needed",
-            "community_load",
+            "net_demand_forecast",
         ]
         subset = select_observation_from_default(full, names)
         self.assertEqual(subset.shape, (observation_dim(names),))
         self.assertEqual(subset.shape, (29,))
+
+    def test_extra_forecast_features_not_in_default_layout(self):
+        by_name = {r["name"]: r for r in list_observation_features()}
+        self.assertFalse(by_name["demand_forecast"]["in_default_layout"])
+        self.assertFalse(by_name["generation_forecast"]["in_default_layout"])
+        self.assertTrue(by_name["net_demand_forecast"]["in_default_layout"])
 
     def test_unknown_feature_name_rejected(self):
         problems = validate_feature_names(["fully_charged", "not_a_real_feature"])
@@ -118,7 +126,7 @@ class ObservationCatalogTests(unittest.TestCase):
         rows = list_observation_features()
         self.assertEqual(len(rows), len(FEATURES))
         by_name = {r["name"]: r for r in rows}
-        self.assertEqual(by_name["community_load"]["size"], 24)
+        self.assertEqual(by_name["net_demand_forecast"]["size"], 24)
         self.assertTrue(by_name["fully_charged"]["in_default_layout"])
 
 
@@ -139,6 +147,7 @@ class AnnSidecarIntegrationTests(unittest.TestCase):
         features, power_levels = require_ann_sidecar_config(model_path)
         self.assertEqual(observation_dim(features), 44)
         self.assertIsNone(power_levels)  # binary legacy model
+        self.assertIn("net_demand_forecast", features)
 
     def test_ann_policy_rejects_feature_dim_mismatch(self):
         """Hard-fail when sidecar feature length != network input dim."""
@@ -149,7 +158,7 @@ class AnnSidecarIntegrationTests(unittest.TestCase):
         if not model_path.exists():
             self.skipTest(f"Default ANN model not found: {model_path}")
 
-        tiny = ["fully_charged", "community_load"]
+        tiny = ["fully_charged", "net_demand_forecast"]
         self.assertNotEqual(observation_dim(tiny), 44)
 
         with self.assertRaisesRegex(ValueError, "observation_dim"):

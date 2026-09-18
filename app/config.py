@@ -22,6 +22,14 @@ DB_ECHO = _get_bool_env("DB_ECHO", default=False)
 
 AUTH_SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "change-me-in-production")
 AUTH_ALGORITHM = os.getenv("AUTH_ALGORITHM", "HS256")
+
+# Master key used to encrypt/decrypt per-pilot secrets (pilot_secret.ciphertext).
+# Must be a urlsafe base64 32-byte Fernet key. Lives ONLY in the environment
+# (.env.local / platform secret store), never in git or the database. If it is
+# lost or changed, previously stored secrets can no longer be decrypted.
+# Generate with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+EV_SECRETS_KEY = os.getenv("EV_SECRETS_KEY", "")
 AUTH_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 AUTH_PBKDF2_ITERATIONS = int(os.getenv("AUTH_PBKDF2_ITERATIONS", "390000"))
 
@@ -65,10 +73,3 @@ FORECAST_ARTIFACT_MAX_AGE_DAYS: int = int(_max_age_raw) if _max_age_raw.strip() 
 CSV_IMPORT_MAX_BYTES = int(os.getenv("CSV_IMPORT_MAX_BYTES", str(52_428)))
 # Maximum number of rows processed per import call
 CSV_IMPORT_MAX_ROWS = int(os.getenv("CSV_IMPORT_MAX_ROWS", "200"))
-
-# ---------------------------------------------------------------------------
-# Base-load forecast (external API)
-# ---------------------------------------------------------------------------
-# When set, forecast_load() calls this URL via HTTP POST instead of using the
-# built-in static fallback value.
-BASE_LOAD_FORECAST_API_URL = os.getenv("BASE_LOAD_FORECAST_API_URL", "")

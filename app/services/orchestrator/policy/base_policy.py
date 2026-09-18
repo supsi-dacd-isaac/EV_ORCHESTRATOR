@@ -49,8 +49,8 @@ class BasePolicy(ABC):
     ) -> PolicyDecision:
         # `context` carries raw (non-normalized) values that some rule-based
         # policies need but the normalized `obs` vector does not expose,
-        # e.g. nominal_power_kw, forecasted_energy_kwh, energy_delivered_kwh.
-        # Policies that don't need it can ignore the parameter.
+        # e.g. nominal_power_kw, forecasted_energy_kwh, energy_delivered_kwh,
+        # is_fully_charged. Policies that don't need it can ignore the parameter.
         ...
 
     @abstractmethod

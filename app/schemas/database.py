@@ -171,27 +171,98 @@ class PilotCreate(BaseModel):
     name: str
     id_owner: UUID
     timezone_name: str = "Europe/Zurich"
-    forecast_meter: Optional[str] = None
-    forecast_site: Optional[str] = None
     policy_signals: Optional[dict[str, Any]] = None
+    data_sources: Optional[dict[str, Any]] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "interped",
+                "id_owner": "00000000-0000-0000-0000-000000000000",
+                "timezone_name": "Europe/Zurich",
+                "data_sources": {
+                    "example_influx": {
+                        "type": "influxdb",
+                        "url": "https://example.com/influxdb/",
+                        "org": "interped",
+                        "bucket": "interped",
+                        "token_secret": "example_influx_token",
+                    },
+                    "example_demand_forecaster": {
+                        "type": "rest_api",
+                        "base_url": "https://example.com/demand_forecaster",
+                        "auth_secret": "example_demand_api_key",
+                        "auth": {"type": "header", "name": "X-API-Key"},
+                    },
+                },
+                "policy_signals": {
+                    "wind_excess": {
+                        "enabled": True,
+                        "source": "example_influx",
+                        "query": {
+                            "measurement": "active_power",
+                            "sensor_id": "example-wind-sensor",
+                            "aggregate": "last",
+                            "lookback_minutes": 30,
+                            "scale": 0.001,
+                        },
+                    },
+                    "grid_net_power": {
+                        "enabled": True,
+                        "source": "example_influx",
+                        "query": {
+                            "measurement": "active_power",
+                            "import_sensors": ["example-grid-import-sensor"],
+                            "export_sensors": [],
+                            "scale": 0.001,
+                            "aggregate_every": "15m",
+                        },
+                    },
+                    "demand_forecaster": {
+                        "enabled": True,
+                        "source": "example_demand_forecaster",
+                        "path": "/forecast/example",
+                        "body": {
+                            "site": "AIC",
+                            "meter": "example_meter",
+                            "start_time": "{{start_time}}",
+                        },
+                        "response_path": "demand_forecast",
+                        "value_field": "forecast",
+                        "time_field": "timestamp",
+                    },
+                },
+            }
+        }
+    )
 
 class PilotUpdate(BaseModel):
     id: Optional[UUID] = None
     name: Optional[str] = None
     id_owner: Optional[UUID] = None
     timezone_name: Optional[str] = None
-    forecast_meter: Optional[str] = None
-    forecast_site: Optional[str] = None
     policy_signals: Optional[dict[str, Any]] = None
+    data_sources: Optional[dict[str, Any]] = None
 
 class PilotRead(BaseModel):
     id: UUID
     name: str
     id_owner: UUID
     timezone_name: str
-    forecast_meter: Optional[str]
-    forecast_site: Optional[str]
     policy_signals: Optional[dict[str, Any]] = None
+    data_sources: Optional[dict[str, Any]] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class PilotSecretSet(BaseModel):
+    # Inbound only: the plaintext token/key. It is encrypted immediately and is
+    # never echoed back by any endpoint.
+    value: str
+
+class PilotSecretRead(BaseModel):
+    # Outbound: metadata only, so callers can verify a secret exists and when it
+    # was last set — WITHOUT ever exposing the value.
+    name: str
+    created_at: datetime
+    updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 class EvForecastStatsCreate(BaseModel):

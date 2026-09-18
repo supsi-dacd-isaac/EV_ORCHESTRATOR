@@ -1,6 +1,6 @@
 {
-  "name": "Default ANN (binary charge / not_charge)",
-  "description": "Historical default Actor model. Uses the full default observation layout (44 features). Binary outputs: class 0 = not_charge, class 1 = charge.",
+  "name": "FFF Policy",
+  "description": "Policy trained using all the forecasted features. 3200 epochs.",
   "observation_features": [
     "vehicle_connected",
     "fully_charged",
@@ -22,6 +22,10 @@
     "charging_rate_norm",
     "num_charging_points_norm",
     "load_level_relative",
-    "net_demand_forecast"
-  ]
+    "net_demand_forecast",
+    "grid_net_power_q40_month",
+    "grid_net_power_q70_month",
+    "grid_net_power_max_month"
+  ],
+  "power_levels_kw": [0, 4.16, 6.93, 11.0, 22.0]
 }

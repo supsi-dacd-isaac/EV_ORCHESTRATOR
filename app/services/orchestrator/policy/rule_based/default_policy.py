@@ -5,7 +5,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from app.services.orchestrator.policy.base_policy import BasePolicy, PolicyDecision
-from app.services.orchestrator.obs_layout import OBS_FULLY_CHARGED
 
 
 class DefaultRuleBasedPolicy(BasePolicy):
@@ -13,6 +12,7 @@ class DefaultRuleBasedPolicy(BasePolicy):
 
     Charges at full power whenever connected and not fully charged.
     Does not specify a power level — the correction filter clamps to charger nominal power.
+    Reads ``is_fully_charged`` from ``context`` (observation vector is unused).
     """
 
     def compute_action(
@@ -20,7 +20,9 @@ class DefaultRuleBasedPolicy(BasePolicy):
         obs: np.ndarray,
         context: Optional[Dict[str, Any]] = None,
     ) -> PolicyDecision:
-        if bool(obs[OBS_FULLY_CHARGED]):
+        _ = obs  # rule-based: decisions come from context, not the ANN layout
+        context = context or {}
+        if bool(context.get("is_fully_charged")):
             return PolicyDecision(action="not_charge", suggested_power_kw=None)
         return PolicyDecision(action="charge", suggested_power_kw=None)
 

@@ -202,7 +202,12 @@ class AnnPolicy(BasePolicy):
         context: Optional[Dict[str, Any]] = None,
     ) -> PolicyDecision:
         # context is unused: this ANN only relies on the normalized obs vector.
-        model_obs = select_observation_from_default(obs, self.observation_features)
+        obs_arr = np.asarray(obs, dtype=np.float32).reshape(-1)
+        if obs_arr.shape == (self.expected_observation_dim,):
+            # Already assembled to this model's sidecar layout.
+            model_obs = obs_arr
+        else:
+            model_obs = select_observation_from_default(obs_arr, self.observation_features)
         if model_obs.shape != (self.expected_observation_dim,):
             raise ValueError(
                 f"Assembled ANN observation has shape {model_obs.shape}, "

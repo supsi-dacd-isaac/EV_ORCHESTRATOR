@@ -192,9 +192,22 @@ CREATE TABLE public.pilot (
     name character varying NOT NULL,
     id_owner uuid NOT NULL,
     timezone_name character varying NOT NULL DEFAULT 'Europe/Zurich',
-    forecast_meter character varying,
-    forecast_site character varying,
-    policy_signals jsonb
+    policy_signals jsonb,
+    data_sources jsonb
+);
+
+
+--
+-- Name: pilot_secret; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.pilot_secret (
+    id uuid NOT NULL,
+    id_pilot uuid NOT NULL,
+    name character varying NOT NULL,
+    ciphertext text NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    updated_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
 
@@ -278,6 +291,31 @@ ALTER TABLE ONLY public.pilot
 
 ALTER TABLE ONLY public.pilot
     ADD CONSTRAINT pilot_unique UNIQUE (name);
+
+
+--
+-- Name: pilot_secret pilot_secret_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.pilot_secret
+    ADD CONSTRAINT pilot_secret_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: pilot_secret pilot_secret_pilot_name_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.pilot_secret
+    ADD CONSTRAINT pilot_secret_pilot_name_key UNIQUE (id_pilot, name);
+
+
+--
+-- Name: pilot_secret pilot_secret_pilot_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.pilot_secret
+    ADD CONSTRAINT pilot_secret_pilot_fkey FOREIGN KEY (id_pilot)
+        REFERENCES public.pilot (id) ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 --
