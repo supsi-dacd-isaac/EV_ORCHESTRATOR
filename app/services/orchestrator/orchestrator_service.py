@@ -357,6 +357,14 @@ def compute_and_save_action(
             f"Default policy also failed: {fallback_error_message}"
         )[:2000]
 
+    # Columns store the policy that actually produced the decision (or the last
+    # attempted executor). Assigned policy remains in decision_context.policy_error.
+    executed_algorithm = control_algorithm
+    executed_policy = control_policy_slug
+    if used_fallback or fallback_failed:
+        executed_algorithm = "rule_based"
+        executed_policy = DEFAULT_RULE_BASED_SLUG
+
     action_row = Actions(
         id=action_id,
         current_time=ts_utc,
@@ -367,8 +375,8 @@ def compute_and_save_action(
         cumulative_duration_probability=cum_prob,
         suggested_action=suggested_action,
         id_cs=session_id,
-        control_policy=control_policy_slug,
-        control_algorithm=control_algorithm,
+        control_policy=executed_policy,
+        control_algorithm=executed_algorithm,
         correction_applied=was_corrected,
         suggested_power_kw=suggested_power_kw,
         decision_context=decision_context,
