@@ -16,8 +16,12 @@ import httpx
 BASE = "http://localhost:8000"
 USER = "user_adv"
 PASSWORD = "user_adv"
+ADMIN_USER = "supsi_admin"
+ADMIN_PASSWORD = "replace-with-initial-admin-password"
 GUEST_USER = f"guest_e2e_{uuid.uuid4().hex[:8]}"
 GUEST_PASS = "guest_e2e_pass_1"
+PROMOTED_USER = f"adv_e2e_{uuid.uuid4().hex[:8]}"
+PROMOTED_PASS = "adv_e2e_pass_1"
 OUT = "tests/_e2e_results.json"
 
 # Pilot-UserAdv-3 chargers (Europe/London) — policies as assigned in DB at test start
@@ -145,22 +149,18 @@ def run() -> None:
             ("obs_features", "/admin/policies/observation-features", "admin"),
             ("forecaster_latest_wind", f"/forecaster/charger/{CHARGER_WIND}/latest", "forecaster"),
             ("forecaster_latest_fff", f"/forecaster/charger/{CHARGER_FFF}/latest", "forecaster"),
+            ("forecaster_history_wind", f"/forecaster/charger/{CHARGER_WIND}/history", "forecaster"),
         ]:
             r = c.get(path)
-            # observation-features may be admin-only
-            expect_ok = r.status_code == 200
-            notes = ""
-            if case_id == "obs_features" and r.status_code in (401, 403):
-                notes = "admin-only; forbidden for role=user is expected"
-                expect_ok = True  # expected denial
+            if case_id in ("list_forecast_stats", "list_cdf", "obs_features"):
                 record(
                     case_id,
                     area,
                     f"GET {path}",
-                    "403 for non-admin OR 200",
-                    True,
-                    safe_json(r),
-                    notes,
+                    "403 for role=user (admin-only) OR 200",
+                    r.status_code in (200, 403),
+                    f"status={r.status_code} body={str(safe_json(r))[:200]}",
+                    "Admin-only endpoints: 403 is expected for user_adv",
                 )
                 continue
             record(
@@ -168,9 +168,8 @@ def run() -> None:
                 area,
                 f"GET {path}",
                 "200",
-                expect_ok,
+                r.status_code == 200,
                 f"status={r.status_code} sample={str(safe_json(r))[:200]}",
-                notes,
             )
 
         # Policies detail
@@ -222,7 +221,7 @@ def run() -> None:
         record(
             "assign_default_policy",
             "policies",
-            "PATCH charger P3-C04 → rule_based/default",
+            "PATCH charger P3-C04 to rule_based/default",
             "200",
             r.status_code == 200,
             safe_json(r),
@@ -660,6 +659,252 @@ def run() -> None:
             safe_json(r),
         )
 
+    # ── Promote guest -> user-adv, then pilot/charger/session ───────
+    # Fresh guest signup -> admin sets role=user-adv -> re-login ->
+    # create pilot + charger -> assign rule_based/default -> one session.
+    promoted_owner_id: Optional[str] = None
+    with client() as c:
+        r = c.post(
+            "/auth/signup",
+            json={
+                "user": PROMOTED_USER,
+                "password": PROMOTED_PASS,
+                "company_name": "E2E Promoted Adv Co",
+            },
+        )
+        signup_body = safe_json(r)
+        signup_ok = r.status_code in (200, 201) and isinstance(signup_body, dict)
+        promoted_owner_id = signup_body.get("id") if signup_ok else None
+        record(
+            "promote_guest_signup",
+            "lifecycle",
+            f"Signup guest {PROMOTED_USER} for promotion",
+            "201 role=guest",
+            signup_ok and signup_body.get("role") == "guest",
+            signup_body,
+        )
+
+        r = c.post(
+            "/auth/login",
+            json={"user": ADMIN_USER, "password": ADMIN_PASSWORD},
+        )
+        admin_token = r.json().get("access_token") if r.status_code == 200 else None
+        admin_role = r.json().get("role") if r.status_code == 200 else None
+        record(
+            "admin_login",
+            "lifecycle",
+            "Login as supsi_admin",
+            "200 + admin role",
+            bool(admin_token) and admin_role == "admin",
+            f"status={r.status_code} role={admin_role}",
+        )
+
+    if admin_token and promoted_owner_id:
+        with client(admin_token) as a:
+            r = a.put(
+                f"/db/owners/{promoted_owner_id}",
+                json={"role": "user-adv"},
+            )
+            body = safe_json(r)
+            record(
+                "admin_promote_user_adv",
+                "lifecycle",
+                "Admin PUT owner role=user-adv",
+                "200 role=user-adv",
+                r.status_code == 200
+                and isinstance(body, dict)
+                and body.get("role") == "user-adv",
+                body if isinstance(body, dict) else f"status={r.status_code} {body}",
+            )
+
+    promoted_token: Optional[str] = None
+    with client() as c:
+        r = c.post(
+            "/auth/login",
+            json={"user": PROMOTED_USER, "password": PROMOTED_PASS},
+        )
+        login_body = safe_json(r)
+        promoted_token = (
+            login_body.get("access_token") if isinstance(login_body, dict) else None
+        )
+        record(
+            "promote_relogin",
+            "lifecycle",
+            "Re-login after promotion",
+            "200 role=user-adv",
+            r.status_code == 200
+            and bool(promoted_token)
+            and isinstance(login_body, dict)
+            and login_body.get("role") == "user-adv",
+            login_body,
+        )
+
+    if promoted_token and promoted_owner_id:
+        new_pilot_id: Optional[str] = None
+        new_charger_id: Optional[str] = None
+        with client(promoted_token) as p:
+            # Guest-as-user-adv must own the pilot (id_owner = self)
+            r = p.post(
+                "/db/pilots",
+                json={
+                    "name": f"E2E-Pilot-{PROMOTED_USER[-8:]}",
+                    "id_owner": promoted_owner_id,
+                    "timezone_name": "Europe/Zurich",
+                },
+            )
+            pilot_body = safe_json(r)
+            if r.status_code in (200, 201) and isinstance(pilot_body, dict):
+                new_pilot_id = str(pilot_body.get("id") or "")
+            record(
+                "promote_create_pilot",
+                "lifecycle",
+                "user-adv creates own pilot",
+                "200/201",
+                bool(new_pilot_id),
+                pilot_body,
+            )
+
+            if new_pilot_id:
+                r = p.post(
+                    "/db/chargers",
+                    json={
+                        "name": f"E2E-C-{PROMOTED_USER[-8:]}",
+                        "type": "AC",
+                        "latitude": 46.0,
+                        "longitude": 8.9,
+                        "nominal_power": 11.0,
+                        "plugs": "Type2",
+                        "id_owner": promoted_owner_id,
+                        "id_pilot": new_pilot_id,
+                    },
+                )
+                ch_body = safe_json(r)
+                if r.status_code in (200, 201) and isinstance(ch_body, dict):
+                    new_charger_id = str(ch_body.get("id") or "")
+                record(
+                    "promote_create_charger",
+                    "lifecycle",
+                    "user-adv creates charger on new pilot",
+                    "200/201",
+                    bool(new_charger_id),
+                    ch_body,
+                )
+
+            if new_charger_id:
+                r = p.patch(
+                    f"/chargers/{new_charger_id}/policy",
+                    json={
+                        "control_algorithm": "rule_based",
+                        "control_policy": "default",
+                    },
+                )
+                record(
+                    "promote_assign_default",
+                    "lifecycle",
+                    "Assign rule_based/default on new charger",
+                    "200",
+                    r.status_code == 200,
+                    safe_json(r),
+                )
+
+                t0 = "2026-07-20T11:00:00"
+                t1 = "2026-07-20T11:15:00"
+                t2 = "2026-07-20T11:45:00"
+                ensure_disconnected(p, new_charger_id, t0)
+
+                r = p.post(
+                    "/events/vehicle_connected",
+                    json={
+                        "charger_id": new_charger_id,
+                        "timestamp": t0,
+                        "measured_power_kw": 7.0,
+                        "is_fully_charged": False,
+                    },
+                )
+                conn = safe_json(r)
+                session_id = None
+                if r.status_code == 200 and isinstance(conn, dict):
+                    session_id = conn.get("session_id") or (conn.get("session") or {}).get(
+                        "id"
+                    )
+                    if not session_id:
+                        act = p.get("/events/active_sessions")
+                        if act.status_code == 200:
+                            for s in act.json():
+                                if str(s.get("charger_id")) == new_charger_id:
+                                    session_id = s.get("id") or s.get("session_id")
+                record(
+                    "promote_session_connect",
+                    "lifecycle",
+                    "Connect session on promoted-user charger",
+                    "200 + session",
+                    r.status_code == 200,
+                    f"status={r.status_code} session_id={session_id} body={str(conn)[:220]}",
+                )
+
+                r2 = p.post(
+                    "/events/charging_update",
+                    json={
+                        "charger_id": new_charger_id,
+                        "timestamp": t1,
+                        "avg_power_last_15min_kw": 6.5,
+                        "energy_delivered_kwh": 1.6,
+                        "is_fully_charged": False,
+                    },
+                )
+                upd = safe_json(r2)
+                algo = None
+                policy = None
+                # Prefer action rows when session_id known
+                if session_id:
+                    ra = p.get(f"/sessions/actions/session/{session_id}")
+                    actions = ra.json() if ra.status_code == 200 else []
+                    last = actions[-1] if actions else {}
+                    algo = last.get("control_algorithm")
+                    policy = last.get("control_policy")
+                if algo is None and isinstance(upd, dict):
+                    algo = upd.get("control_algorithm")
+                    policy = upd.get("control_policy")
+                record(
+                    "promote_session_update",
+                    "lifecycle",
+                    "Session update uses rule_based/default",
+                    "200 algo=rule_based policy=default",
+                    r2.status_code == 200
+                    and algo == "rule_based"
+                    and policy == "default",
+                    f"status={r2.status_code} algo={algo} policy={policy} "
+                    f"body={str(upd)[:280]}",
+                )
+
+                r3 = p.post(
+                    "/events/vehicle_disconnected",
+                    json={
+                        "charger_id": new_charger_id,
+                        "timestamp": t2,
+                        "avg_power_last_15min_kw": 0.0,
+                        "energy_delivered_kwh": 4.0,
+                        "is_fully_charged": False,
+                    },
+                )
+                record(
+                    "promote_session_disconnect",
+                    "lifecycle",
+                    "Disconnect promoted-user session",
+                    "200",
+                    r3.status_code == 200,
+                    safe_json(r3),
+                )
+    else:
+        record(
+            "promote_lifecycle_skipped",
+            "lifecycle",
+            "Skipped pilot/charger/session (missing token or owner id)",
+            "not skipped",
+            False,
+            f"token={bool(promoted_token)} owner_id={promoted_owner_id}",
+        )
+
     _write()
 
 
@@ -669,6 +914,7 @@ def _write() -> None:
         "base_url": BASE,
         "user": USER,
         "guest_user": GUEST_USER,
+        "promoted_user": PROMOTED_USER,
         "summary": {
             "total": len(RESULTS),
             "pass": sum(1 for r in RESULTS if r.ok),
@@ -682,7 +928,8 @@ def _write() -> None:
     print(f"wrote {OUT}")
     for r in RESULTS:
         mark = "OK" if r.ok else "FAIL"
-        print(f"[{mark}] {r.id}: {r.description} :: {r.detail[:120]}")
+        detail = (r.detail or "").encode("ascii", "replace").decode("ascii")
+        print(f"[{mark}] {r.id}: {r.description} :: {detail[:120]}")
 
 
 if __name__ == "__main__":

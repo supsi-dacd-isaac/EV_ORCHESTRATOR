@@ -343,10 +343,12 @@ def test_generic_charger_session_filter_uses_per_charger_tz():
         dt for dt, _ in sessions
         if get_local_hour(dt, "Europe/Zurich") == target_hour
     ]
-    # Would only match the Zurich session (06:00 UTC → 07:00 Zurich)
-    # London session at 07:00 UTC → 08:00 Zurich — INCORRECTLY excluded
-    assert len(matched_wrong) == 1  # proves the bug we fixed
-
+    # Zurich applied to every session incorrectly includes London@06:00 UTC
+    # (06:00 UTC = 07:00 Zurich) and excludes London@07:00 UTC (08:00 Zurich).
+    assert len(matched_wrong) == 2
+    assert matched_wrong != matched_correct
+    assert matched_wrong[0] == sessions[0][0]  # Zurich 06:00 UTC (ok by luck)
+    assert matched_wrong[1] == sessions[3][0]  # London 06:00 UTC (false positive)
 
 # ---------------------------------------------------------------------------
 # 7. to_pilot_time helper
