@@ -5,9 +5,9 @@
     {
       "example_influx": {
         "type": "influxdb",
-        "url": "https://.../influxdb/",
-        "org": "interped",
-        "bucket": "interped",
+        "url": "https://example.com/influxdb/",
+        "org": "example",
+        "bucket": "example",
         "token_secret": "example_influx_token"
       }
     }

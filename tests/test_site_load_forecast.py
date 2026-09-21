@@ -45,12 +45,12 @@ class FeatureNeedTests(unittest.TestCase):
 
 class ParseAndTemplateTests(unittest.TestCase):
     def test_fill_start_time_placeholder(self):
-        body = {"site": "AIC", "start_time": "{{start_time}}", "meter": "m1"}
+        body = {"site": "example_site", "start_time": "{{start_time}}", "meter": "m1"}
         filled = lfs._fill_body_template(
             body, datetime(2026, 9, 14, 10, 30, tzinfo=timezone.utc)
         )
         self.assertEqual(filled["start_time"], "2026-09-14T10:30:00+00:00")
-        self.assertEqual(filled["site"], "AIC")
+        self.assertEqual(filled["site"], "example_site")
 
     def test_fill_start_time_floors_to_15_minute_grid(self):
         body = {"start_time": "{{start_time}}"}
@@ -86,7 +86,7 @@ class ParseAndTemplateTests(unittest.TestCase):
         self.assertEqual(timestamps[0].year, 2026)
 
     def test_parse_findhorn_style_nested_ok(self):
-        # Same shape as AIC for the fields we care about.
+        # Same shape as example_site for the fields we care about.
         payload = {"demand_forecast": _points(BASELOAD_FORECAST_HORIZON_STEPS, 10.0)}
         values, _ = lfs._parse_forecast_list(
             payload,
@@ -109,7 +109,7 @@ class ParseAndTemplateTests(unittest.TestCase):
             )
 
     def test_meter_list_expands(self):
-        bodies = lfs._meter_variants({"meter": ["a", "b"], "site": "AIC"})
+        bodies = lfs._meter_variants({"meter": ["a", "b"], "site": "example_site"})
         self.assertEqual(len(bodies), 2)
         self.assertEqual(bodies[0]["meter"], "a")
         self.assertEqual(bodies[1]["meter"], "b")
@@ -141,7 +141,7 @@ class FetchSiteLoadTests(unittest.TestCase):
                     "source": "demand_api",
                     "path": "/forecast/example",
                     "body": {
-                        "site": "AIC",
+                        "site": "example_site",
                         "meter": "example_meter",
                         "start_time": "{{start_time}}",
                     },
@@ -188,7 +188,7 @@ class FetchSiteLoadTests(unittest.TestCase):
         self.assertEqual(bundle.meta["net"]["mode"], "demand_only")
         mock_post.assert_called_once()
         body = mock_post.call_args.kwargs["body"]
-        self.assertEqual(body["site"], "AIC")
+        self.assertEqual(body["site"], "example_site")
         self.assertIn("start_time", body)
         self.assertNotIn("{{", body["start_time"])
 

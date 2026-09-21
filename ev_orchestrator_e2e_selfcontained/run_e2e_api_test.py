@@ -5,12 +5,12 @@ Run an end-to-end API test for the deployed EV Orchestrator service.
 Run directly in PyCharm or with:
     python run_e2e_api_test.py
 
-Before running, edit the ADMIN_USERNAME and ADMIN_PASSWORD constants below.
-No environment variables or command-line arguments are required.
+Credentials and the target URL come from the environment. Do not hard-code them.
 
 Expected workflow:
     1. Run generate_charging_schedule.py once.
-    2. Edit ADMIN_USERNAME / ADMIN_PASSWORD in this file.
+    2. Export EV_ORCH_BASE_URL, EV_ORCH_ADMIN_USER, EV_ORCH_ADMIN_PASSWORD,
+       and EV_ORCH_TEST_PASSWORD.
     3. Run this file.
 """
 
@@ -30,32 +30,29 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+import os
+
 import requests
 
 # =============================================================================
-# EDITABLE CONFIGURATION — NO ENVIRONMENT VARIABLES ARE USED
+# CONFIGURATION — credentials and deployment URL come from the environment
 # =============================================================================
 
-# For a local test, set BASE_URL = "http://localhost:8000" (or wherever the
-# service is running) and keep SCHEDULE_DAYS = 1. For the partner deployment,
-# use the production URL and SCHEDULE_DAYS = 7.
-BASE_URL = "https://example.com/ev-orchestrator"
-# BASE_URL = "http://localhost:8000"
+# Local default. Point EV_ORCH_BASE_URL at a deployment when needed.
+# Keep SCHEDULE_DAYS = 1 for a short local run.
+BASE_URL = os.environ.get("EV_ORCH_BASE_URL", "http://localhost:8000")
 TIMEZONE = "Europe/Zurich"
 
-# Replace these two placeholders locally before running the API test.
-ADMIN_USERNAME = "first_admin"
-ADMIN_PASSWORD = "REDACTED"
-# ADMIN_USERNAME = "supsi_admin"
-# ADMIN_PASSWORD = "replace-with-initial-admin-password"
+ADMIN_USERNAME = os.environ.get("EV_ORCH_ADMIN_USER", "")
+ADMIN_PASSWORD = os.environ.get("EV_ORCH_ADMIN_PASSWORD", "")
 
-TEST_USERNAME = "interped_user1"
-TEST_PASSWORD = "REDACTED"
+TEST_USERNAME = os.environ.get("EV_ORCH_TEST_USER", "example_user1")
+TEST_PASSWORD = os.environ.get("EV_ORCH_TEST_PASSWORD", "")
 TEST_USER_TYPE = "user-adv" #it doesnt influence the authorization permitssions 
 TEST_USER_ROLE = "user"
-TEST_COMPANY_NAME = "InterPED Synthetic Test User"
+TEST_COMPANY_NAME = "Example Synthetic Test User"
 
-PILOT_NAME = "interped_example pilot"
+PILOT_NAME = "example pilot"
 PILOT_TIMEZONE = "Europe/Zurich"
 
 CHARGER_COUNT = 5
@@ -910,9 +907,10 @@ def validate_schedule_file(events: list[ScheduleEvent], logger: StructuredLogger
 
 
 def verify_admin_credentials_are_not_placeholders() -> None:
-    if "PLACEHOLDER" in ADMIN_USERNAME or "PLACEHOLDER" in ADMIN_PASSWORD:
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD or not TEST_PASSWORD:
         raise RuntimeError(
-            "Please edit ADMIN_USERNAME and ADMIN_PASSWORD at the top of run_e2e_api_test.py before running."
+            "Set EV_ORCH_ADMIN_USER, EV_ORCH_ADMIN_PASSWORD and EV_ORCH_TEST_PASSWORD "
+            "in the environment before running. Do not hard-code them in this file."
         )
 
 
@@ -962,20 +960,20 @@ def main() -> None:
     # 4. Logout admin.
     admin.logout()
 
-    # 5. Login as interped_user1.
+    # 5. Login as the test user.
     user_client = EVClient(BASE_URL, logger, TEST_USERNAME, TEST_PASSWORD)
     user_client.login()
 
     # 6. Check existing pilots.
-    pilots = as_list(user_client.request("GET", "/db/pilots", label="list pilots as interped_user1"))
+    pilots = as_list(user_client.request("GET", "/db/pilots", label="list pilots as test user"))
     pilot_visible = find_by_name(pilots, PILOT_NAME) is not None
-    logger.check("pilot_visible_to_interped_user1", passed=pilot_visible, pilot_name=PILOT_NAME)
+    logger.check("pilot_visible_to_test_user", passed=pilot_visible, pilot_name=PILOT_NAME)
 
     # 7. Create/reuse chargers. If user permissions do not allow this, retry as admin.
     try:
         chargers = get_or_create_chargers(user_client, owner_id, pilot_id)
     except Exception as exc:
-        logger.warning("Charger setup as interped_user1 failed; retrying as admin", error=str(exc))
+        logger.warning("Charger setup as test user failed; retrying as admin", error=str(exc))
         user_client.logout()
         admin = EVClient(BASE_URL, logger, ADMIN_USERNAME, ADMIN_PASSWORD)
         admin.login()

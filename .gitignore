@@ -26,3 +26,7 @@ docker-compose-deployment.yml
 
 # Local EV forecast model pickles (generated/runtime artifacts)
 app/services/ev_forecast/artifacts/*.pkl
+
+# Local live E2E dumps (may contain JWTs / response bodies)
+tests/_e2e_*.json
+tests/_e2e_rows.json

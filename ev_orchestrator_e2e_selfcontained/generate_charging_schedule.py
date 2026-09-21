@@ -44,7 +44,7 @@ SCHEDULE_CSV_NAME = "synthetic_charging_schedule.csv"
 SESSION_SUMMARY_CSV_NAME = "synthetic_session_summary.csv"
 GENERATION_SUMMARY_JSON_NAME = "synthetic_generation_summary.json"
 
-PILOT_NAME = "interped_example pilot"
+PILOT_NAME = "example pilot"
 CHARGER_COUNT = 5
 NOMINAL_POWER_KW = 11.0
 

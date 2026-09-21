@@ -2,7 +2,15 @@
 
 This folder contains a two-step test setup for the deployed EV Orchestrator API.
 
-The package intentionally does **not** use environment variables or command-line arguments. All values are defined as editable constants at the top of the Python files, so the files can be opened and run directly from PyCharm.
+The package reads the deployment URL and credentials from the environment. Do not commit passwords.
+
+```text
+EV_ORCH_BASE_URL          default http://localhost:8000
+EV_ORCH_ADMIN_USER
+EV_ORCH_ADMIN_PASSWORD
+EV_ORCH_TEST_USER         default example_user1
+EV_ORCH_TEST_PASSWORD
+```
 
 ## Files
 
@@ -53,11 +61,11 @@ The CSV contains **relative deltas in minutes**, not fixed absolute timestamps. 
 The generator creates a 7-day synthetic schedule for 5 charging points:
 
 ```text
-interped_example pilot CP1
-interped_example pilot CP2
-interped_example pilot CP3
-interped_example pilot CP4
-interped_example pilot CP5
+example pilot CP1
+example pilot CP2
+example pilot CP3
+example pilot CP4
+example pilot CP5
 ```
 
 Each charging point can have a different number of sessions per day. This is controlled by the dictionary:
@@ -129,22 +137,13 @@ These plots are produced locally only; they are not sent to the API.
 
 ## Step 2 — Run the API test
 
-Open `run_e2e_api_test.py` and edit only these two constants first:
-
-```python
-ADMIN_USERNAME = "ADMIN_USERNAME_PLACEHOLDER"
-ADMIN_PASSWORD = "ADMIN_PASSWORD_PLACEHOLDER"
-```
-
-Then run the file directly in PyCharm.
-
-Or from a terminal:
+Set the environment variables listed at the top of this file, then run:
 
 ```bash
 python run_e2e_api_test.py
 ```
 
-The runner will stop immediately if these credentials are still placeholders.
+The runner stops immediately if `EV_ORCH_ADMIN_USER`, `EV_ORCH_ADMIN_PASSWORD`, or `EV_ORCH_TEST_PASSWORD` is missing.
 
 ## What the API runner does
 
@@ -176,7 +175,7 @@ using the constants at the top of the file.
 
 If a token later expires, the runner automatically logs in again and retries the failed request once.
 
-### 2. Create or reuse `interped_user1`
+### 2. Create or reuse `example_user1`
 
 It lists owners with:
 
@@ -184,7 +183,7 @@ It lists owners with:
 GET /db/owners
 ```
 
-If `interped_user1` already exists, it reuses it. Otherwise it creates it using:
+If `example_user1` already exists, it reuses it. Otherwise it creates it using:
 
 ```text
 POST /db/owners
@@ -193,8 +192,8 @@ POST /db/owners
 with:
 
 ```text
-user: interped_user1
-password: REDACTED
+user: example_user1
+password: value of EV_ORCH_TEST_PASSWORD (not stored in this repo)
 role: user
 type: user-adv
 ```
@@ -207,7 +206,7 @@ It lists pilots with:
 GET /db/pilots
 ```
 
-If `interped_example pilot` already exists, it reuses it. Otherwise it creates it using:
+If `example pilot` already exists, it reuses it. Otherwise it creates it using:
 
 ```text
 POST /db/pilots
@@ -216,8 +215,8 @@ POST /db/pilots
 with:
 
 ```text
-name: interped_example pilot
-owner: interped_user1
+name: example pilot
+owner: example_user1
 timezone: Europe/Zurich
 ```
 
@@ -229,7 +228,7 @@ It logs out from the admin session with:
 POST /auth/logout
 ```
 
-### 5. Login as `interped_user1`
+### 5. Login as `example_user1`
 
 It logs in as the new/reused test user.
 
@@ -241,18 +240,18 @@ It calls:
 GET /db/pilots
 ```
 
-and verifies that `interped_example pilot` is visible to `interped_user1`.
+and verifies that `example pilot` is visible to `example_user1`.
 
 ### 7. Create or reuse 5 chargers
 
 It creates or reuses:
 
 ```text
-interped_example pilot CP1
-interped_example pilot CP2
-interped_example pilot CP3
-interped_example pilot CP4
-interped_example pilot CP5
+example pilot CP1
+example pilot CP2
+example pilot CP3
+example pilot CP4
+example pilot CP5
 ```
 
 The payload uses:
@@ -261,12 +260,12 @@ The payload uses:
 type: V1G
 nominal_power: 11
 plugs: Type2
-owner: interped_user1
-pilot: interped_example pilot
+owner: example_user1
+pilot: example pilot
 latitude/longitude: Swiss coordinates around Lugano/Ticino
 ```
 
-If charger creation as `interped_user1` is not allowed by the deployed API, the runner logs this and retries the charger setup as admin.
+If charger creation as `example_user1` is not allowed by the deployed API, the runner logs this and retries the charger setup as admin.
 
 ### 8. Resolve the CSV and execute the schedule
 
@@ -410,7 +409,7 @@ GET /db/forecast_jobs
 
 ### 14. Logout
 
-Finally, it logs out from `interped_user1`.
+Finally, it logs out from `example_user1`.
 
 ## Logs produced by the runner
 
@@ -465,7 +464,7 @@ get_or_create_chargers(...)
 
 ## Additional checks that would be useful later
 
-1. Verify authorization boundaries explicitly, for example that `interped_user1` cannot access chargers or pilots owned by another user.
+1. Verify authorization boundaries explicitly, for example that `example_user1` cannot access chargers or pilots owned by another user.
 2. Add duplicate event tests, such as sending the same connection twice for the same charger and checking that the API rejects or handles it consistently.
 3. Add invalid physical values, such as negative energy or power greater than nominal power, and verify that the API rejects them.
 4. Add timezone edge cases around daylight saving time changes in `Europe/Zurich`.

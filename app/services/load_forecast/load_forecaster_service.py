@@ -13,7 +13,7 @@ Config lives on the pilot::
       "enabled": true,
       "source": "…",
       "path": "/forecast/example",
-      "body": {"site": "AIC", "meter": "example_meter", "start_time": "{{start_time}}"},
+      "body": {"site": "example_site", "meter": "example_meter", "start_time": "{{start_time}}"},
       # meter may also be a list → one call per meter, series summed
       "response_path": "demand_forecast",
       "value_field": "forecast",

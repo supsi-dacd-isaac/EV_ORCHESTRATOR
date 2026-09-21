@@ -144,8 +144,8 @@ def get_wind_excess_reading(
             "example_influx": {
                 "type": "influxdb",
                 "url": "https://example.com/influxdb/",
-                "org": "interped",
-                "bucket": "interped",
+                "org": "example",
+                "bucket": "example",
                 "token_secret": "example_influx_token"   # -> pilot_secret row
             }
         }

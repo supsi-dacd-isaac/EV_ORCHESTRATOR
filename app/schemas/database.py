@@ -176,15 +176,15 @@ class PilotCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "name": "interped",
+                "name": "example_site",
                 "id_owner": "00000000-0000-0000-0000-000000000000",
                 "timezone_name": "Europe/Zurich",
                 "data_sources": {
                     "example_influx": {
                         "type": "influxdb",
                         "url": "https://example.com/influxdb/",
-                        "org": "interped",
-                        "bucket": "interped",
+                        "org": "example",
+                        "bucket": "example",
                         "token_secret": "example_influx_token",
                     },
                     "example_demand_forecaster": {
@@ -222,7 +222,7 @@ class PilotCreate(BaseModel):
                         "source": "example_demand_forecaster",
                         "path": "/forecast/example",
                         "body": {
-                            "site": "AIC",
+                            "site": "example_site",
                             "meter": "example_meter",
                             "start_time": "{{start_time}}",
                         },

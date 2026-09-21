@@ -207,8 +207,8 @@ class DataSourceValidationTests(unittest.TestCase):
             "example_influx": {
                 "type": "influxdb",
                 "url": "https://example.com/influxdb/",
-                "org": "interped",
-                "bucket": "interped",
+                "org": "example",
+                "bucket": "example",
                 "token_secret": "example_influx_token",
             }
         })
@@ -258,7 +258,7 @@ class PilotReadRedactionTests(unittest.TestCase):
         other_id = uuid4()
         pilot = types.SimpleNamespace(
             id=uuid4(),
-            name="interped",
+            name="example_site",
             id_owner=owner_id,
             timezone_name="UTC",
             policy_signals=None,
