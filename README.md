@@ -22,21 +22,21 @@ Examples below use placeholders (`YOUR_*`). Do not commit real `.env` files, API
 - [Tests](#tests)
 - [Checklist](#checklist)
 
-Other docs: [`CONFIGURATION.md`](CONFIGURATION.md) (what is a secret vs configuration), [`ev_orchestrator_e2e_selfcontained/README.md`](ev_orchestrator_e2e_selfcontained/README.md) (deployed API test package). A compose deployment guide lives in `ev_orchestrator_deployment/README.md` when that package is present.
+Other docs: [`CONFIGURATION.md`](CONFIGURATION.md) (what is a secret vs configuration), [`ev_orchestrator_e2e_selfcontained/README.md`](ev_orchestrator_e2e_selfcontained/README.md) (deployed API test package).
 
 ## Docker image
 
 A GitHub Release publishes an image to GitHub Container Registry. The repository and the GHCR package are configured separately: if GitHub creates the package as private, set it to public in the package settings.
 
 ```bash
-docker pull ghcr.io/supsi-dacd-isaac/ev_orchestrator:latest
+docker pull ghcr.io/supsi-dacd-isaac/ev-orchestrator:latest
 ```
 
-The API listens on port **8000**. A full stack is `db`, `redis`, `orchestrator`, `celery_worker`, and `celery_beat`. Named volumes typically used in deployment are `pg_data` (Postgres) and `forecast_artifacts` (trained forecast models).
+The API listens on port **8000**. A full stack is `db`, `redis`, `orchestrator`, `celery_worker`, and `celery_beat`. PostgreSQL data are persisted in the `pg_data` volume, while forecast artifacts are stored under `app/services/ev_forecast/artifacts`.
 
 First start:
 
-1. Copy `.env.example` to `.env` and set the production secrets listed below.
+1. Copy `.env.example` to `.env.local` and set the production secrets listed below.
 2. Start the stack.
 3. `GET /health` returns `{ "status": "OK" }`.
 4. Log in as the seeded admin and create or promote operators.
@@ -54,7 +54,7 @@ Clients are expected to update about every **15 minutes**. `valid_until` on an a
 
 ## Architecture
 
-```
+```text
 Clients (charger backend / operator tools)
         │  HTTPS + Bearer JWT
         ▼
@@ -127,10 +127,10 @@ Authorization: Bearer YOUR_ACCESS_TOKEN
 ## Runtime configuration
 
 ```bash
-cp .env.example .env
+cp .env.example .env.local
 ```
 
-`.env` is gitignored. `.env.example` contains placeholders only.
+`.env.local` is gitignored. `.env.example` contains placeholders only.
 
 | Variable | Purpose |
 |----------|---------|
@@ -417,7 +417,7 @@ POST /events/vehicle_disconnected
 
 Inspect with `GET /events/active_sessions` and `GET /sessions/actions/session/{session_id}`. `decision_context` holds `inputs`, optional `signal_meta` (`site_load`, `wind_excess`, `grid_net_power`), `observation` (`features` and `values` for ANN), and `warnings`.
 
-```
+```text
 vehicle_connected        → action 1
 charging_update (t+15m)  → action 2, action 3, …
 vehicle_disconnected     → session closed, forecasts updated
@@ -478,7 +478,7 @@ Unless noted, routes require `Authorization: Bearer …`.
 
 ## Checklist
 
-- [ ] Production secrets are set and `.env` is not in git
+- [ ] Production secrets are set and `.env.local` is not in git
 - [ ] The admin seed password is changed if it was still a placeholder
 - [ ] `EV_SECRETS_KEY` is backed up before any pilot token is stored
 - [ ] The pilot timezone matches the site
