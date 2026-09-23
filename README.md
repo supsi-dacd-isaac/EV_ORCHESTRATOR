@@ -8,7 +8,7 @@ Examples below use placeholders (`YOUR_*`). Do not commit real `.env` files, API
 
 ## Contents
 
-- [Docker image](#docker-image)
+- [Docker image and deployment](#docker-image-and-deployment)
 - [What it does](#what-it-does)
 - [Architecture](#architecture)
 - [Authentication and roles](#authentication-and-roles)
@@ -24,22 +24,25 @@ Examples below use placeholders (`YOUR_*`). Do not commit real `.env` files, API
 
 Other docs: [`CONFIGURATION.md`](CONFIGURATION.md) (what is a secret vs configuration), [`ev_orchestrator_e2e_selfcontained/README.md`](ev_orchestrator_e2e_selfcontained/README.md) (deployed API test package).
 
-## Docker image
+## Docker image and deployment
 
 A GitHub Release publishes an image to GitHub Container Registry. The repository and the GHCR package are configured separately: if GitHub creates the package as private, set it to public in the package settings.
 
 ```bash
-docker pull ghcr.io/supsi-dacd-isaac/ev-orchestrator:latest
+docker pull ghcr.io/supsi-dacd-isaac/ev_orchestrator:latest
 ```
 
-The API listens on port **8000**. A full stack is `db`, `redis`, `orchestrator`, `celery_worker`, and `celery_beat`. PostgreSQL data are persisted in the `pg_data` volume, while forecast artifacts are stored under `app/services/ev_forecast/artifacts`.
+- Deploy (pull GHCR image, `.env`): [`docker-compose-deployment.yml`](docker-compose-deployment.yml)
+- Local (build from source, `.env.local`): [`docker-compose.yml`](docker-compose.yml)
 
-First start:
+Deploy steps:
 
-1. Copy `.env.example` to `.env.local` and set the production secrets listed below.
-2. Start the stack.
+1. Copy `.env.example` to `.env` and set at least `POSTGRES_PASSWORD`, `AUTH_SECRET_KEY`, `ADMIN_INIT_PASSWORD`, and `EV_SECRETS_KEY`.
+2. `docker compose -f docker-compose-deployment.yml up -d` (API on port **8000**).
 3. `GET /health` returns `{ "status": "OK" }`.
 4. Log in as the seeded admin and create or promote operators.
+
+Volumes: `pg_data` (Postgres), `forecast_artifacts` (forecast models). Pin a release by replacing `:latest` with e.g. `:v0.2.0`.
 
 ## What it does
 

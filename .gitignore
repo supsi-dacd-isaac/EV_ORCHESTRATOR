@@ -21,7 +21,6 @@ app/run_debug.py
 # Deployment package (large Docker image tar — not tracked in git)
 ev_orchestrator_deployment/
 ev_orchestrator_deployment.7z
-docker-compose-deployment.yml
 /ev_orchestrator_e2e_selfcontained/outputs/
 
 # Local EV forecast model pickles (generated/runtime artifacts)
