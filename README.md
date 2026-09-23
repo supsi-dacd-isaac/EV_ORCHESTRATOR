@@ -29,7 +29,7 @@ Other docs: [`CONFIGURATION.md`](CONFIGURATION.md) (what is a secret vs configur
 A GitHub Release publishes an image to GitHub Container Registry. The repository and the GHCR package are configured separately: if GitHub creates the package as private, set it to public in the package settings.
 
 ```bash
-docker pull ghcr.io/supsi-dacd-isaac/ev_orchestrator:latest
+docker pull ghcr.io/supsi-dacd-isaac/ev-orchestrator:latest
 ```
 
 - Deploy (pull GHCR image, `.env`): [`docker-compose-deployment.yml`](docker-compose-deployment.yml)
